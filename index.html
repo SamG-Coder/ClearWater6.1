@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClearWater6.1 · Light below the surface</title><link rel="icon" href="data:,"><link rel="stylesheet" href="style.css"></head><body>
+<canvas id="water" aria-label="FFT water with fly camera"></canvas>
+<header><a class="brand" href="./">CLEARWATER<span>6.1</span></a><span class="badge"><i></i> LIGHT BELOW THE SURFACE</span></header>
+<aside id="panel"><div class="eyebrow">A SPECTRAL WATER STUDY</div><h1>Follow<br>the light.</h1><p class="intro">Clear shallows. Moving sunlight.<br>An open horizon to explore.</p>
+<div class="presets"><button id="shallows" class="active">Shallows</button><button id="ocean">Open water</button></div>
+<label>Depth <output id="depthValue"></output><input id="depth" type="range" min="0.5" max="12" step="0.1" value="1.4"></label>
+<label>Wave energy <output id="energyValue"></output><input id="energy" type="range" min="0.2" max="2.5" step="0.05" value="0.8"></label>
+<label>Wind <output id="windValue"></output><input id="wind" type="range" min="2" max="14" step="0.5" value="5"></label>
+<label>Exposure <output id="exposureValue"></output><input id="exposure" type="range" min="0.5" max="1.7" step="0.05" value="1"></label>
+<div class="row"><label>Resolution<select id="quality"><option value="768">Performance</option><option value="1152" selected>Balanced</option><option value="1920">1080p</option><option value="2560">1440p</option></select></label><label>View<select id="view"><option value="0">Water</option><option value="1">Caustics</option><option value="2">Normals</option></select></label></div>
+<div class="actions"><button id="fly">Fly camera ↗</button><button id="pause">Pause</button><button id="reset">Reset</button></div>
+<p class="hint">Drag to look · WASD to fly<br>Q / E lower / rise · Shift boost<br>Scroll for speed · Esc releases mouse</p><div class="engine">CUDA WEBSHADER <span>2 × 128² FFT</span></div></aside>
+<button id="toggle">Hide controls ↗</button><footer><span>REFRACTION / SPECTRAL WAVES / SUNLIGHT CAUSTICS</span><span id="metrics">Preparing the water…</span></footer>
+<div id="loading"><div class="ripple">≈</div><p id="loadText">Building the surface…</p></div><div id="error" hidden></div><script type="module" src="app.js"></script></body></html>
