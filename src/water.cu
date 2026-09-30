@@ -85,7 +85,8 @@ __device__ float4 sample(const float4 *s,float x,float z,int c){
 __device__ float4 wave(const float4 *s,float x,float z,float distance){
  float4 a=sample(s,x,z,0),b=sample(s,x,z,1),d=sample(s,x,z,2);
  float fade=1/(1+distance*distance*.0008f);
- return make_float4(a.x+b.x+d.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
+ // Fade unresolved short displacement as well as its normal near the horizon.
+ return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
 // The camera state is GPU resident. JavaScript supplies raw input axes only.
 __global__ void camera_step(float4 *camera,float dt,float forward,float side,float up,float lookX,float lookY,float speed,int reset){
@@ -156,12 +157,14 @@ __device__ float3 seabed(float x,float z,float footprint){
  float phase=z*38+x*5+bend;
  float ridge=sinf(phase),slope=cosf(phase);
  float detail=1/(1+footprint*footprint*1100);
- float grain=materialNoise(x*170,z*170);
+ // Subpixel grain and gravel would flicker at reduced screen resolution.
+ float grainDetail=1/(1+footprint*footprint*80000);
+ float grain=grainDetail>.03f?materialNoise(x*170,z*170)*grainDetail:0;
  float illumination=.76f+detail*(.13f*ridge-.15f*slope+.1f*grain);
  float3 sand=scale(blend(vec(.30f,.235f,.135f),vec(.49f,.41f,.26f),broad),illumination*(.85f+.2f*mid));
  // Sparse organic gravel pockets; most of the floor remains rippled sand.
  float pocket=clamp01((materialNoise(x*.7f+83,z*.7f-19)-.55f)*5);
- if(pocket>.01f){
+ if(pocket>.01f&&footprint<.075f){
   float gx=floorf(x*7),gz=floorf(z*7),nearest=5,tone=0;
   for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
    float cx=gx+(float)i,cz=gz+(float)j,seed=cell(cx,cz);
@@ -173,7 +176,7 @@ __device__ float3 seabed(float x,float z,float footprint){
    float dist=sqrtf(rx*rx*1.6f+rz*rz*.65f)/(radius*edge);
    if(dist<nearest){nearest=dist;tone=seed;}
   }
-  float coverage=clamp01((1-nearest)/fmaxf(.10f,footprint*35))*pocket;
+  float coverage=clamp01((1-nearest)/fmaxf(.10f,footprint*35))*pocket*clamp01((.075f-footprint)/.035f);
   float3 rock=blend(vec(.055f,.063f,.054f),vec(.22f,.16f,.09f),tone);
   rock=scale(rock,.65f+.6f*sqrtf(clamp01(1-nearest*nearest)));
   sand=blend(sand,rock,coverage);
@@ -248,7 +251,10 @@ __global__ void render(const float4 *surface,const float4 *light,const float4 *c
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
  col=blend(through,reflected,fresnel);
- float3 halfv=unit(minus(sunDir(),ray));float spec=powf(fmaxf(0,dotv(n,halfv)),8000)*3.5f;
+ float3 halfv=unit(minus(sunDir(),ray));
+ float pixelFootprint=t/(float)height;
+ float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
+ float spec=powf(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec));
  float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));

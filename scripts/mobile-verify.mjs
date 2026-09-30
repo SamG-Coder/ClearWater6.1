@@ -21,9 +21,12 @@ try{
  await page.screenshot({path:'captures/mobile-portrait.png'});
  await page.locator('#touchMode').tap();await touch('touchStart',[{x:180,y:380,id:1}]);await touch('touchMove',[{x:240,y:410,id:1}]);await touch('touchEnd');await page.waitForTimeout(150);
  const looked=await page.evaluate(()=>waterLab.inspect());assert.notEqual(looked.camera[4],before.camera[4]);
- const button=await page.locator('[data-move="KeyW"]').boundingBox();
- await touch('touchStart',[{x:button.x+button.width/2,y:button.y+button.height/2,id:2}]);await page.waitForTimeout(300);await touch('touchCancel');
+ const button=await page.locator('#moveStick').boundingBox(),lookButton=await page.locator('#lookStick').boundingBox();
+ const movePoint={x:button.x+button.width/2,y:button.y+button.height/2-34,id:2},lookPoint={x:lookButton.x+lookButton.width/2+28,y:lookButton.y+lookButton.height/2,id:3};
+ await touch('touchStart',[movePoint,lookPoint]);await page.waitForTimeout(300);await touch('touchCancel');
  const moved=await page.evaluate(()=>waterLab.inspect());assert.ok(Math.hypot(moved.camera[0]-looked.camera[0],moved.camera[2]-looked.camera[2])>.2);
+ assert.notEqual(moved.camera[4],looked.camera[4],'Both joysticks must work simultaneously');
+ for(const id of ['moveStick','lookStick'])assert.equal(await page.locator('#'+id+' .stick-knob').evaluate(e=>e.style.transform),'translate(0px, 0px)');
  await page.waitForTimeout(150);const stopped=await page.evaluate(()=>waterLab.inspect());assert.deepEqual(stopped.camera,moved.camera,'Cancelled touch must stop camera motion');
  assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),1,'Constant wind must not regenerate random spectra');
  await page.locator('#toggle').tap();await page.locator('#wind').evaluate(e=>{e.value='6';e.dispatchEvent(new Event('input',{bubbles:true}));});await page.waitForTimeout(100);
@@ -46,6 +49,6 @@ try{
  await iphone.waitForFunction(start=>waterDiagnostics.frames>=start+15,iphoneLandscape.frames);
  await iphone.screenshot({path:'captures/mobile-iphone-landscape.png'});await iphone.close();assert.deepEqual(errors,[]);
  let baseline=null;try{baseline=JSON.parse(await readFile('captures/mobile-before.json','utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
- const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,touchLook:true,touchFly:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
+ const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,touchLook:true,touchFly:true,simultaneousJoysticks:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
  await writeFile('captures/mobile-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}
