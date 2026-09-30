@@ -5,11 +5,15 @@ await mkdir('captures',{recursive:true});
 const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']});
 try{
  const page=await browser.newPage({...devices['Pixel 7']}),errors=[];
+ await page.addInitScript(()=>{const submit=GPUQueue.prototype.submit;window.testQueueSubmissions=0;GPUQueue.prototype.submit=function(...args){window.testQueueSubmissions++;return submit.apply(this,args);};});
  page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
  await page.goto(process.env.WATER_URL||'http://127.0.0.1:5191/');
  await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
+ await page.waitForFunction(()=>waterDiagnostics.frames>=3||waterDiagnostics.errors.length);
  const initial=await page.evaluate(()=>waterDiagnostics);
  assert.deepEqual(initial.errors,[]);assert.equal(initial.mobile,true);assert.equal(initial.targetFps,30);assert.equal(initial.photonRays,256);assert.equal(initial.readbackBytes,0);
+ assert.equal(initial.activeCascades,2,'The exactly-zero force field should need no FFT before interaction');
+ const submissions=await page.evaluate(()=>({count:testQueueSubmissions,frames:waterDiagnostics.frames}));assert.ok(submissions.count>=submissions.frames&&submissions.count<=submissions.frames+1,'Rendering must use one GPU submission per frame, including canvas transfer');
  assert.ok(Math.max(initial.width,initial.height)<=960);assert.equal(await page.locator('#panel').isVisible(),false);assert.equal(await page.locator('#touchControls').isVisible(),true);
  const cdp=await page.context().newCDPSession(page);
  const touch=async(type,points=[])=>cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points.map(p=>({...p,radiusX:5,radiusY:5,force:1}))});
@@ -19,6 +23,7 @@ try{
  for(let i=0;i<20;i++){await touch('touchMove',[{x:200+i*6,y:440+i*4,id:0}]);await page.waitForTimeout(20);}
  await touch('touchEnd');await page.waitForTimeout(100);
  const force=await page.evaluate(()=>waterLab.inspect());assert.ok(force.forceEnergy>1e-7&&force.finite);assert.deepEqual(force.camera,before.camera);
+ assert.equal(await page.evaluate(()=>waterDiagnostics.activeCascades),3,'A water drag must activate the complete force FFT');
  await page.screenshot({path:'captures/mobile-portrait.png'});
  await page.locator('#touchMode').tap();await touch('touchStart',[{x:180,y:380,id:1}]);await touch('touchMove',[{x:240,y:410,id:1}]);await touch('touchEnd');await page.waitForTimeout(150);
  const looked=await page.evaluate(()=>waterLab.inspect());assert.notEqual(looked.camera[4],before.camera[4]);
@@ -30,8 +35,12 @@ try{
  for(const id of ['moveStick'])assert.equal(await page.locator('#'+id+' .stick-knob').evaluate(e=>e.style.transform),'translate(0px, 0px)');
  await page.waitForTimeout(150);const stopped=await page.evaluate(()=>waterLab.inspect());assert.deepEqual(stopped.camera,moved.camera,'Cancelled touch must stop camera motion');
  assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),1,'Constant wind must not regenerate random spectra');
+ assert.equal(await page.evaluate(()=>waterDiagnostics.dispersionSeeds),1,'Constant depth must not rebuild dispersion');
  await page.locator('#toggle').tap();await page.locator('#wind').evaluate(e=>{e.value='6';e.dispatchEvent(new Event('input',{bubbles:true}));});await page.waitForTimeout(100);
- assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),2);await page.screenshot({path:'captures/mobile-settings.png'});await page.locator('#toggle').tap();
+ assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),2);assert.equal(await page.evaluate(()=>waterDiagnostics.dispersionSeeds),1,'Wind changes must not rebuild depth-dependent frequencies');
+ await page.locator('#depth').evaluate(e=>{e.value='2';e.dispatchEvent(new Event('input'));});await page.waitForFunction(()=>waterDiagnostics.dispersionSeeds===2);
+ await page.locator('#depth').evaluate(e=>{e.value='1.4';e.dispatchEvent(new Event('input'));});await page.waitForFunction(()=>waterDiagnostics.dispersionSeeds===3);
+ await page.screenshot({path:'captures/mobile-settings.png'});await page.locator('#toggle').tap();
  const benchPage=await browser.newPage({...devices['Pixel 7']});await benchPage.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?t=4');await benchPage.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});const after=await benchPage.evaluate(()=>waterLab.benchmark());await benchPage.close();
  await page.setViewportSize({width:839,height:412});await page.waitForFunction(()=>waterDiagnostics.width>waterDiagnostics.height);
  const landscape=await page.evaluate(()=>waterDiagnostics);assert.ok(Math.max(landscape.width,landscape.height)<=960);await page.screenshot({path:'captures/mobile-landscape.png'});

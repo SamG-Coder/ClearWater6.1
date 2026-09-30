@@ -43,15 +43,24 @@ __global__ void seed_modes(float4 *seed,float2 *twiddles,float wind){
 }
 // Hermitian time spectrum: h0(k)e^iwt + conjugate(h0(-k))e^-iwt.
 // Bit-reversal on both axes prepares the in-place-order radix-2 inverse FFT.
-__global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturbance,float time,float depth,float energy){
+// Frequencies and force envelopes depend on depth, not animation time.
+__global__ void prepare_modes(float *motion,float depth){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
+ if(x>=128||z>=128||c>=3)return;
+ int fx=x<64?x:x-128,fz=z<64?z:z-128;
+ float kx=6.2831853f*(float)fx/24,kz=6.2831853f*(float)fz/24,kk=kx*kx+kz*kz;
+ float k=c==2?sqrtf(kk):6.2831853f*sqrtf((float)(fx*fx+fz*fz))/patch(c);
+ float e=expf(-2*fminf(20,k*depth)),tanhd=(1-e)/(1+e);
+ float omega=c==2?sqrtf(9.81f*k*(1-e)/(1+e)):sqrtf(9.81f*k*tanhd);
+ int idx=z*128+x;motion[c*16384+idx]=omega;
+ if(c==2){motion[49152+idx]=expf(-kk*.24f*.24f*.5f);motion[65536+idx]=.32f+.009f*kk;}
+}
+__global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturbance,const float *motion,float time,float energy){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
  if(x>=128||z>=128||c>=3)return;
  if(c==2){float4 d=disturbance[z*128+x];output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2(d.x,d.y);return;}
  float4 h=seed[c*16384+z*128+x];float2 a=make_float2(h.x,h.y),b=make_float2(h.z,h.w);
- int fx=x<64?x:x-128,fz=z<64?z:z-128;
- float k=6.2831853f*sqrtf((float)(fx*fx+fz*fz))/patch(c);
- float kd=fminf(20,k*depth),e=expf(-2*kd),tanhd=(1-e)/(1+e);
- float w=sqrtf(9.81f*k*tanhd),phase=w*time;
+ float phase=motion[c*16384+z*128+x]*time;
  float2 p=make_float2(cosf(phase),sinf(phase));
  float2 u=cmul(a,p),v=cmul(make_float2(b.x,-b.y),make_float2(p.x,-p.y));
  output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2((u.x+v.x)*energy,(u.y+v.y)*energy);
@@ -109,6 +118,15 @@ __device__ float4 wave(const float4 *s,float x,float z,float distance){
  // Fade unresolved short displacement as well as its normal near the horizon.
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
+__device__ float sample_height(const float4 *s,float x,float z,int c){
+ float u=x*128/patch(c),v=z*128/patch(c);int ix=(int)floorf(u),iz=(int)floorf(v),base=c*16384;
+ float a=fract(u),b=fract(v);
+ return mixf(mixf(s[base+wrap128(iz)*128+wrap128(ix)].x,s[base+wrap128(iz)*128+wrap128(ix+1)].x,a),mixf(s[base+wrap128(iz+1)*128+wrap128(ix)].x,s[base+wrap128(iz+1)*128+wrap128(ix+1)].x,a),b);
+}
+__device__ float wave_height(const float4 *s,float x,float z,float distance){
+ float a=sample_height(s,x,z,0),b=sample_height(s,x,z,1),d=sample_height(s,x,z,2);
+ float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
+}
 // The camera state is GPU resident. JavaScript supplies raw input axes only.
 __global__ void camera_step(float4 *camera,float dt,float forward,float side,float up,float lookX,float lookY,float speed,int reset){
  float4 p=camera[0],r=camera[1];
@@ -137,7 +155,7 @@ __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *br
  float3 ray=unit(plus(f,plus(scale(right,pointerX*aspect*.65f),scale(up,pointerY*.65f))));
  if(ray.y>-.06f){brush[1]=make_float4(old.x,old.y,0,0);return;}
  float t=-p.y/ray.y;
- for(int j=0;j<4;j++){float4 w=wave(surface,p.x+ray.x*t,p.z+ray.z*t,t);t=mixf(t,(w.x-p.y)/ray.y,.75f);}
+ for(int j=0;j<4;j++){float h=wave_height(surface,p.x+ray.x*t,p.z+ray.z*t,t);t=mixf(t,(h-p.y)/ray.y,.75f);}
  float x=p.x+ray.x*t,z=p.z+ray.z*t;
  float dx=old.z>.5f&&moving!=0?x-old.x:0,dz=old.z>.5f&&moving!=0?z-old.y:0;
  // Bound a single event's travel so a camera teleport cannot create an explosion.
@@ -146,17 +164,17 @@ __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *br
 }
 // Analytic damped spectral oscillator: h'' + omega? h = moving pressure.
 // Both the height and vertical velocity are complex Fourier coefficients.
-__global__ void force_modes(float4 *disturbance,const float4 *brush,float dt,float depth,int clear){
+__global__ void force_modes(float4 *disturbance,const float4 *brush,const float *motion,float dt,int clear){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=128||z>=128)return;
  int idx=z*128+x;float4 state=disturbance[idx];
  if(clear!=0||x==64||z==64||(x==0&&z==0)){disturbance[idx]=make_float4(0,0,0,0);return;}
  float4 b=brush[0];float distance=sqrtf(b.z*b.z+b.w*b.w);
  if(distance==0&&state.x==0&&state.y==0&&state.z==0&&state.w==0)return;
  int fx=x<64?x:x-128,fz=z<64?z:z-128;
- float kx=6.2831853f*(float)fx/24,kz=6.2831853f*(float)fz/24,kk=kx*kx+kz*kz,k=sqrtf(kk);
- float e=expf(-2*fminf(20,k*depth)),omega=sqrtf(9.81f*k*(1-e)/(1+e));
+ float kx=6.2831853f*(float)fx/24,kz=6.2831853f*(float)fz/24;
+ float omega=motion[32768+idx],envelope=motion[49152+idx],decay=motion[65536+idx];
  float radius=.24f;
- float amplitude=-4.0f*fminf(.6f,distance)*6.2831853f*radius*radius/576*expf(-kk*radius*radius*.5f);
+ float amplitude=-4.0f*fminf(.6f,distance)*6.2831853f*radius*radius/576*envelope;
  float pr=0,pi=0;
  if(distance>0)for(int j=0;j<4;j++){
   float t=((float)j+.5f)/4,px=b.x-b.z*(1-t),pz=b.y-b.w*(1-t);
@@ -165,16 +183,17 @@ __global__ void force_modes(float4 *disturbance,const float4 *brush,float dt,flo
  // Displacement impulse from the moving pressure brush; exact free evolution
  // after release provides propagating wakes instead of a drawn height mask.
  state.z+=amplitude*pr;state.w+=amplitude*pi;
- float co=cosf(omega*dt),si=sinf(omega*dt),damping=expf(-(.32f+.009f*kk)*dt);
+ float co=cosf(omega*dt),si=sinf(omega*dt),damping=expf(-decay*dt);
  disturbance[idx]=make_float4((state.x*co+state.z/omega*si)*damping,(state.y*co+state.w/omega*si)*damping,(state.z*co-state.x*omega*si)*damping,(state.w*co-state.y*omega*si)*damping);
 }
 __device__ float3 refractv(float3 d,float3 n,float eta){float c=dotv(d,n);return minus(scale(d,eta),scale(n,eta*c+sqrtf(fmaxf(0,1-eta*eta*(1-c*c)))));}
 __device__ float3 sunDir(){return unit(vec(-.42f,.66f,-.63f));}
+__device__ float positive_power(float value,float exponent){return value>0?exp2f(log2f(value)*exponent):0;}
 __device__ float3 sky(float3 d){
- float v=powf(clamp01(d.y),.45f);float3 col=blend(vec(.38f,.55f,.68f),vec(.045f,.16f,.36f),v);
+ float v=positive_power(clamp01(d.y),.45f);float3 col=blend(vec(.38f,.55f,.68f),vec(.045f,.16f,.36f),v);
  // Explicit fixed powers avoid the compiler's software-f64 integer pow path.
  float sun=fmaxf(0,dotv(d,sunDir())),s2=sun*sun,s4=s2*s2,s8=s4*s4,s16=s8*s8;
- col=plus(col,scale(vec(1,.83f,.55f),powf(sun,16000)*20+s16*s16*s16*.07f));
+ col=plus(col,scale(vec(1,.83f,.55f),positive_power(sun,16000)*20+s16*s16*s16*.07f));
  float cloud=clamp01(.5f+.25f*sinf(d.x*28+d.z*17)+.25f*sinf(d.z*43-d.x*12));
  float cloud2=cloud*cloud,cloud4=cloud2*cloud2;
  float cirrus=cloud4*cloud4*clamp01(d.y*3)*.22f;
@@ -231,10 +250,11 @@ __device__ float2 landing(const float4 *s,float x,float z,float depth,float eta)
 }
 // Forward sunlight transport. Bilinear photon splats accumulate all ray
 // branches at folds; fixed-point atomics preserve energy on WebGPU.
-__global__ void caustic_clear(unsigned *photons){
+__global__ void caustic_clear(unsigned *photons,int dispersion){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
- if(x>=256||z>=256)return;int id=(z*256+x)*4;
- photons[id]=0;photons[id+1]=0;photons[id+2]=0;photons[id+3]=0;
+ if(x>=256||z>=256)return;
+ if(dispersion==0){photons[z*256+x]=0;return;}
+ int id=(z*256+x)*4;photons[id]=0;photons[id+1]=0;photons[id+2]=0;photons[id+3]=0;
 }
 __global__ void caustic_map(const float4 *surface,unsigned *photons,float depth,int rays,int dispersion){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
@@ -247,28 +267,37 @@ __global__ void caustic_map(const float4 *surface,unsigned *photons,float depth,
   float u=hit.x*256/6-.5f,v=hit.y*256/6-.5f;
   int ix=(int)floorf(u),iz=(int)floorf(v);float fu=fract(u),fv=fract(v);
   for(int j=0;j<2;j++)for(int i=0;i<2;i++){
-   int px=((ix+i)%256+256)%256,pz=((iz+j)%256+256)%256;
+   int px=(ix+i)&255,pz=(iz+j)&255;
    float weight=(i==0?1-fu:fu)*(j==0?1-fv:fv);
-   atomicAdd(&photons[(pz*256+px)*4+c],(unsigned)(weight*4096+.5f));
+   int target=dispersion==0?pz*256+px:(pz*256+px)*4+c;
+   atomicAdd(&photons[target],(unsigned)(weight*4096+.5f));
   }
  }
 }
 __global__ void caustic_resolve(const unsigned *photons,float4 *light,float normalization,int dispersion){
- int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=256||z>=256)return;
- int id=(z*256+x)*4;
- float r=(float)photons[id]/normalization;
+ // This kernel always launches a complete 32 x 32 grid of 8 x 8 groups.
+ __shared__ unsigned tile[100];
+ int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
+ int id=dispersion==0?z*256+x:(z*256+x)*4;
+ float r=0;
  // At one mobile ray per light texel, regular splat gaps reveal a grid.
  // A periodic tent reconstruction removes that sampling pattern and preserves
  // total light energy without increasing ray count or adding a GPU pass.
  if(dispersion==0){
+  int lane=threadIdx.y*8+threadIdx.x;
+  for(int t=lane;t<100;t+=64){
+   int px=((int)blockIdx.x*8+t%10-1)&255,pz=((int)blockIdx.y*8+t/10-1)&255;
+   tile[t]=photons[pz*256+px];
+  }
+  __syncthreads();
   float filtered=0;
   for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
-   int px=(x+i+256)%256,pz=(z+j+256)%256;
    float weight=(i==0?2.0f:1.0f)*(j==0?2.0f:1.0f);
-   filtered+=(float)photons[(pz*256+px)*4]*weight;
+   int index=((int)threadIdx.y+j+1)*10+(int)threadIdx.x+i+1;
+   filtered+=(float)tile[index]*weight;
   }
   r=filtered/(16*normalization);
- }
+ }else{r=(float)photons[id]/normalization;}
  float g=dispersion!=0?(float)photons[id+1]/normalization:r,b=dispersion!=0?(float)photons[id+2]/normalization:r;
  light[z*256+x]=make_float4(r,g,b,1);
 }
@@ -283,10 +312,10 @@ __global__ void render(const float4 *surface,const float4 *light,const float4 *c
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*((float)x+.5f)/(float)width-1)*(float)width/(float)height;
  float sy=1-2*((float)y+.5f)/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
  float3 r=vec(right.x,right.y,right.z),u=vec(up.x,up.y,up.z);
- float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=sky(ray);
+ float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
  if(ray.y<-.0005f){
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<4;i++){w=wave(surface,pos.x+ray.x*t,pos.z+ray.z*t,t);t=mixf(t,(w.x-pos.y)/ray.y,.75f);}
+ for(int i=0;i<4;i++){float h=wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t);t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  w=wave(surface,p.x,p.z,t);float3 n=unit(vec(-w.y,1,-w.z));float nv=fmaxf(.02f,-dotv(n,ray));
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
@@ -306,12 +335,12 @@ __global__ void render(const float4 *surface,const float4 *light,const float4 *c
  float3 halfv=unit(minus(sunDir(),ray));
  float pixelFootprint=t/(float)height;
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
- float spec=powf(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
+ float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec));
  float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
- }
+ }else{col=sky(ray);}
  float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
- unsigned rr=(unsigned)(powf(film(col.x),.454545f)*255),gg=(unsigned)(powf(film(col.y),.454545f)*255),bb=(unsigned)(powf(film(col.z),.454545f)*255);
+ unsigned rr=(unsigned)(positive_power(film(col.x),.454545f)*255),gg=(unsigned)(positive_power(film(col.y),.454545f)*255),bb=(unsigned)(positive_power(film(col.z),.454545f)*255);
  image[y*width+x]=rr|(gg<<8)|(bb<<16)|4278190080u;
 }
