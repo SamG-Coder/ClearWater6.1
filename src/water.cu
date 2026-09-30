@@ -218,6 +218,18 @@ __global__ void caustic_resolve(const unsigned *photons,float4 *light,float norm
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=256||z>=256)return;
  int id=(z*256+x)*4;
  float r=(float)photons[id]/normalization;
+ // At one mobile ray per light texel, regular splat gaps reveal a grid.
+ // A periodic tent reconstruction removes that sampling pattern and preserves
+ // total light energy without increasing ray count or adding a GPU pass.
+ if(dispersion==0){
+  float filtered=0;
+  for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
+   int px=(x+i+256)%256,pz=(z+j+256)%256;
+   float weight=(i==0?2.0f:1.0f)*(j==0?2.0f:1.0f);
+   filtered+=(float)photons[(pz*256+px)*4]*weight;
+  }
+  r=filtered/(16*normalization);
+ }
  float g=dispersion!=0?(float)photons[id+1]/normalization:r,b=dispersion!=0?(float)photons[id+2]/normalization:r;
  light[z*256+x]=make_float4(r,g,b,1);
 }
