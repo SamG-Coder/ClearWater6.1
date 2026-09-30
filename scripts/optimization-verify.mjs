@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
 // Reference only our own last published source, never other water examples.
 const referenceCommit='564a4c0',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'});
+const oldHtml=execFileSync('git',['show',`${referenceCommit}:index.html`],{encoding:'utf8'});
 const artifacts=new Map();for(const m of oldSource.matchAll(/__global__ void (\w+)/g)){const name=m[1];artifacts.set(name,JSON.stringify(serializableArtifact(compile(oldSource,{entry:name,workgroupSize:['camera_step','brush_pick'].includes(name)?[1,1,1]:[8,8,1]}))));}
 const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']}),base=process.env.WATER_URL||'http://127.0.0.1:5191/';
 const cases=[['shallows',4,1.4,5,false],['late',12,1.4,5,false],['deep',7,8,5,false],['down',4,1.4,5,true]],reference=[];let before,after;
@@ -12,7 +13,7 @@ await mkdir('captures',{recursive:true});
 try{
  for(const old of [true,false]){
   const page=await browser.newPage({...devices['Pixel 7']});
-  if(old){await page.route('**/app.js*',r=>r.fulfill({contentType:'text/javascript',body:oldHost}));await page.route('**/kernels/*.json*',r=>{const name=new URL(r.request().url()).pathname.split('/').at(-1).replace('.json','');return r.fulfill({contentType:'application/json',body:artifacts.get(name)});});}
+  if(old){await page.route(url=>url.href===base+'?t=4',r=>r.fulfill({contentType:'text/html',body:oldHtml}));await page.route('**/app.js*',r=>r.fulfill({contentType:'text/javascript',body:oldHost}));await page.route('**/kernels/*.json*',r=>{const name=new URL(r.request().url()).pathname.split('/').at(-1).replace('.json','');return r.fulfill({contentType:'application/json',body:artifacts.get(name)});});}
   await page.goto(base+'?t=4');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
   for(const [name,time,depth,wind,down] of cases){
    for(const [id,value] of [['depth',depth],['wind',wind]])await page.locator('#'+id).evaluate((e,v)=>{e.value=v;e.dispatchEvent(new Event('input'));},value);

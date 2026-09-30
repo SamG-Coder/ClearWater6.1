@@ -2,8 +2,8 @@ import {GpuRuntime} from './vendor/webcuda/runtime/runtime.js';
 const assetVersion=new URL(import.meta.url).searchParams.get('v')||'local';
 const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
-if(touchDevice){document.body.classList.add('touch','clean');$('quality').value='mobile';$('toggle').textContent='Settings';$('fly').textContent='Look around';}
-let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=false,lastWind=-1;
+if(touchDevice){document.body.classList.add('touch','clean');$('quality').value='mobile';$('toggle').textContent='Settings';$('fly').textContent='Push water';$('touchMode').textContent='Mode: Look';}
+let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=touchDevice,lastWind=-1;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
 let runtime,context,kernels={},width=0,height=0,image,surface,light,camera,fft,photons,disturbance,brush,seed,twiddles;
@@ -43,7 +43,7 @@ canvas.addEventListener('pointermove',e=>{
 for(const event of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(event,endPointer);
 addEventListener('mousemove',e=>{if((drag&&touchPointer===null)||document.pointerLockElement===canvas){lookX+=e.movementX*.0025;lookY-=e.movementY*.0025;if(document.pointerLockElement===canvas){pointerX=0;pointerY=0;}}});
 const padPointers=new Map();
-const sticks={move:{x:0,y:0,pointer:null},look:{x:0,y:0,pointer:null}};
+const sticks={move:{x:0,y:0,pointer:null}};
 function resetSticks(){for(const [name,stick] of Object.entries(sticks)){stick.x=stick.y=0;stick.pointer=null;const el=$(name+'Stick');el.classList.remove('active');el.querySelector('.stick-knob').style.transform='translate(0px,0px)';}}
 for(const [name,stick] of Object.entries(sticks)){
  const el=$(name+'Stick'),knob=el.querySelector('.stick-knob');
@@ -78,7 +78,7 @@ function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars
 function compute(dt,timestampWrites){
  const b=runtime.batch({timestampWrites});
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
- b.dispatch(bind('camera_step',{camera},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+(axis('ArrowRight','ArrowLeft')+sticks.look.x*1.8)*dt,lookY:lookY+(axis('ArrowUp','ArrowDown')-sticks.look.y*1.8)*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),reset}),[1,1,1]);reset=0;lookX=lookY=0;
+ b.dispatch(bind('camera_step',{camera},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),reset}),[1,1,1]);reset=0;lookX=lookY=0;
  b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0}),[1,1,1]);forceMoved=false;
  b.dispatch(bind('force_modes',{disturbance,brush},{dt:playing?dt:0,depth:Number($('depth').value),clear:0}),[16,16,1]);
  const wind=Number($('wind').value);if(wind!==lastWind){b.dispatch(bind('seed_modes',{seed,twiddles},{wind}),[16,16,3]);lastWind=wind;diagnostics.spectrumSeeds=(diagnostics.spectrumSeeds||0)+1;}

@@ -13,6 +13,7 @@ try{
  assert.ok(Math.max(initial.width,initial.height)<=960);assert.equal(await page.locator('#panel').isVisible(),false);assert.equal(await page.locator('#touchControls').isVisible(),true);
  const cdp=await page.context().newCDPSession(page);
  const touch=async(type,points=[])=>cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points.map(p=>({...p,radiusX:5,radiusY:5,force:1}))});
+ assert.equal(await page.locator('#touchMode').textContent(),'Mode: Look');assert.equal(await page.locator('#lookStick').count(),0);await page.locator('#touchMode').tap();
  const before=await page.evaluate(()=>waterLab.inspect());
  await touch('touchStart',[{x:200,y:440,id:0}]);await page.waitForTimeout(100);
  for(let i=0;i<20;i++){await touch('touchMove',[{x:200+i*6,y:440+i*4,id:0}]);await page.waitForTimeout(20);}
@@ -21,12 +22,12 @@ try{
  await page.screenshot({path:'captures/mobile-portrait.png'});
  await page.locator('#touchMode').tap();await touch('touchStart',[{x:180,y:380,id:1}]);await touch('touchMove',[{x:240,y:410,id:1}]);await touch('touchEnd');await page.waitForTimeout(150);
  const looked=await page.evaluate(()=>waterLab.inspect());assert.notEqual(looked.camera[4],before.camera[4]);
- const button=await page.locator('#moveStick').boundingBox(),lookButton=await page.locator('#lookStick').boundingBox();
- const movePoint={x:button.x+button.width/2,y:button.y+button.height/2-34,id:2},lookPoint={x:lookButton.x+lookButton.width/2+28,y:lookButton.y+lookButton.height/2,id:3};
- await touch('touchStart',[movePoint,lookPoint]);await page.waitForTimeout(300);await touch('touchCancel');
+ const button=await page.locator('#moveStick').boundingBox();
+ const movePoint={x:button.x+button.width/2,y:button.y+button.height/2-34,id:2},lookPoint={x:300,y:380,id:3};
+ await touch('touchStart',[movePoint,lookPoint]);await touch('touchMove',[movePoint,{...lookPoint,x:340,y:400}]);await page.waitForTimeout(300);await touch('touchCancel');
  const moved=await page.evaluate(()=>waterLab.inspect());assert.ok(Math.hypot(moved.camera[0]-looked.camera[0],moved.camera[2]-looked.camera[2])>.2);
- assert.notEqual(moved.camera[4],looked.camera[4],'Both joysticks must work simultaneously');
- for(const id of ['moveStick','lookStick'])assert.equal(await page.locator('#'+id+' .stick-knob').evaluate(e=>e.style.transform),'translate(0px, 0px)');
+ assert.notEqual(moved.camera[4],looked.camera[4],'Joystick movement and screen drag look must work simultaneously');
+ for(const id of ['moveStick'])assert.equal(await page.locator('#'+id+' .stick-knob').evaluate(e=>e.style.transform),'translate(0px, 0px)');
  await page.waitForTimeout(150);const stopped=await page.evaluate(()=>waterLab.inspect());assert.deepEqual(stopped.camera,moved.camera,'Cancelled touch must stop camera motion');
  assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),1,'Constant wind must not regenerate random spectra');
  await page.locator('#toggle').tap();await page.locator('#wind').evaluate(e=>{e.value='6';e.dispatchEvent(new Event('input',{bubbles:true}));});await page.waitForTimeout(100);
@@ -41,7 +42,7 @@ try{
  await iphone.goto(process.env.WATER_URL||'http://127.0.0.1:5191/');await iphone.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});
  assert.equal(await iphone.evaluate(()=>waterDiagnostics.mobile),true);
  assert.ok((await iphone.locator('meta[name="viewport"]').getAttribute('content')).includes('viewport-fit=cover'));
- await iphone.locator('#toggle').tap();assert.equal(await iphone.locator('#fly').textContent(),'Look around');
+ await iphone.locator('#toggle').tap();assert.equal(await iphone.locator('#fly').textContent(),'Push water');
  const panel=await iphone.locator('#panel').boundingBox();assert.ok(panel.x>=0&&panel.x+panel.width<=390);
  await iphone.locator('#toggle').tap();await iphone.screenshot({path:'captures/mobile-iphone-portrait.png'});
  await iphone.setViewportSize({width:844,height:390});await iphone.waitForFunction(()=>waterDiagnostics.width>waterDiagnostics.height);
@@ -49,6 +50,6 @@ try{
  await iphone.waitForFunction(start=>waterDiagnostics.frames>=start+15,iphoneLandscape.frames);
  await iphone.screenshot({path:'captures/mobile-iphone-landscape.png'});await iphone.close();assert.deepEqual(errors,[]);
  let baseline=null;try{baseline=JSON.parse(await readFile('captures/mobile-before.json','utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
- const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,touchLook:true,touchFly:true,simultaneousJoysticks:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
+ const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,touchLook:true,touchFly:true,simultaneousMoveAndDragLook:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
  await writeFile('captures/mobile-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}
