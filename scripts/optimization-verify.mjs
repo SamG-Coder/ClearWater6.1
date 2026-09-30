@@ -12,7 +12,7 @@ await mkdir('captures',{recursive:true});
 try{
  for(const old of [true,false]){
   const page=await browser.newPage({...devices['Pixel 7']});
-  if(old){await page.route('**/app.js',r=>r.fulfill({contentType:'text/javascript',body:oldHost}));await page.route('**/kernels/*.json',r=>{const name=new URL(r.request().url()).pathname.split('/').at(-1).replace('.json','');return r.fulfill({contentType:'application/json',body:artifacts.get(name)});});}
+  if(old){await page.route('**/app.js*',r=>r.fulfill({contentType:'text/javascript',body:oldHost}));await page.route('**/kernels/*.json*',r=>{const name=new URL(r.request().url()).pathname.split('/').at(-1).replace('.json','');return r.fulfill({contentType:'application/json',body:artifacts.get(name)});});}
   await page.goto(base+'?t=4');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
   for(const [name,time,depth,wind,down] of cases){
    for(const [id,value] of [['depth',depth],['wind',wind]])await page.locator('#'+id).evaluate((e,v)=>{e.value=v;e.dispatchEvent(new Event('input'));},value);
