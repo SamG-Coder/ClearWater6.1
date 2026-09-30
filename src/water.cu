@@ -31,13 +31,22 @@ __device__ float2 initial(int x,int z,int c,float wind){
  float amp=sqrtf(P*band)*(c==0?.023f:.018f)*6.2831853f/patch(c);
  return make_float2(radius*cosf(angle)*amp,radius*sinf(angle)*amp);
 }
+// Wind-dependent Gaussian spectra are cached; no log/exp/random generation
+// is repeated in the per-frame spectrum kernel.
+__global__ void seed_modes(float4 *seed,float wind){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
+ if(x>=128||z>=128||c>=3)return;
+ if(c==2){seed[c*16384+z*128+x]=make_float4(0,0,0,0);return;}
+ float2 a=initial(x,z,c,wind),b=initial(wrap128(-x),wrap128(-z),c,wind);
+ seed[c*16384+z*128+x]=make_float4(a.x,a.y,b.x,b.y);
+}
 // Hermitian time spectrum: h0(k)e^iwt + conjugate(h0(-k))e^-iwt.
 // Bit-reversal on both axes prepares the in-place-order radix-2 inverse FFT.
-__global__ void spectrum(float2 *output,const float4 *disturbance,float time,float wind,float depth,float energy){
+__global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturbance,float time,float depth,float energy){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
  if(x>=128||z>=128||c>=3)return;
  if(c==2){float4 d=disturbance[z*128+x];output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2(d.x,d.y);return;}
- float2 a=initial(x,z,c,wind),b=initial(wrap128(-x),wrap128(-z),c,wind);
+ float4 h=seed[c*16384+z*128+x];float2 a=make_float2(h.x,h.y),b=make_float2(h.z,h.w);
  int fx=x<64?x:x-128,fz=z<64?z:z-128;
  float k=6.2831853f*sqrtf((float)(fx*fx+fz*fz))/patch(c);
  float kd=fminf(20,k*depth),e=expf(-2*kd),tanhd=(1-e)/(1+e);
@@ -185,12 +194,13 @@ __global__ void caustic_clear(unsigned *photons){
  if(x>=256||z>=256)return;int id=(z*256+x)*4;
  photons[id]=0;photons[id+1]=0;photons[id+2]=0;photons[id+3]=0;
 }
-__global__ void caustic_map(const float4 *surface,unsigned *photons,float depth){
+__global__ void caustic_map(const float4 *surface,unsigned *photons,float depth,int rays,int dispersion){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
- if(x>=512||z>=512)return;
- float wx=((float)x+.5f)*6/512,wz=((float)z+.5f)*6/512;
- for(int c=0;c<3;c++){
-  float eta=c==0?.7524f:(c==1?.7502f:.7480f);
+ if(x>=rays||z>=rays)return;
+ float wx=((float)x+.5f)*6/(float)rays,wz=((float)z+.5f)*6/(float)rays;
+ int channels=dispersion!=0?3:1;
+ for(int c=0;c<channels;c++){
+  float eta=dispersion==0?.7502f:(c==0?.7524f:(c==1?.7502f:.7480f));
   float2 hit=landing(surface,wx,wz,depth,eta);
   float u=hit.x*256/6-.5f,v=hit.y*256/6-.5f;
   int ix=(int)floorf(u),iz=(int)floorf(v);float fu=fract(u),fv=fract(v);
@@ -201,10 +211,12 @@ __global__ void caustic_map(const float4 *surface,unsigned *photons,float depth)
   }
  }
 }
-__global__ void caustic_resolve(const unsigned *photons,float4 *light){
+__global__ void caustic_resolve(const unsigned *photons,float4 *light,float normalization,int dispersion){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=256||z>=256)return;
  int id=(z*256+x)*4;
- light[z*256+x]=make_float4((float)photons[id]/16384,(float)photons[id+1]/16384,(float)photons[id+2]/16384,1);
+ float r=(float)photons[id]/normalization;
+ float g=dispersion!=0?(float)photons[id+1]/normalization:r,b=dispersion!=0?(float)photons[id+2]/normalization:r;
+ light[z*256+x]=make_float4(r,g,b,1);
 }
 __device__ float3 caustic(const float4 *light,float x,float z){
  float u=fract(x/6)*256,v=fract(z/6)*256;int ix=(int)floorf(u),iz=(int)floorf(v);float a=fract(u),b=fract(v);

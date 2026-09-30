@@ -1,0 +1,51 @@
+import {chromium,devices} from 'playwright';
+import assert from 'node:assert/strict';
+import {mkdir,writeFile,readFile} from 'node:fs/promises';
+await mkdir('captures',{recursive:true});
+const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']});
+try{
+ const page=await browser.newPage({...devices['Pixel 7']}),errors=[];
+ page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+ await page.goto(process.env.WATER_URL||'http://127.0.0.1:5191/');
+ await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
+ const initial=await page.evaluate(()=>waterDiagnostics);
+ assert.deepEqual(initial.errors,[]);assert.equal(initial.mobile,true);assert.equal(initial.targetFps,30);assert.equal(initial.photonRays,256);assert.equal(initial.readbackBytes,0);
+ assert.ok(Math.max(initial.width,initial.height)<=960);assert.equal(await page.locator('#panel').isVisible(),false);assert.equal(await page.locator('#touchControls').isVisible(),true);
+ const cdp=await page.context().newCDPSession(page);
+ const touch=async(type,points=[])=>cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points.map(p=>({...p,radiusX:5,radiusY:5,force:1}))});
+ const before=await page.evaluate(()=>waterLab.inspect());
+ await touch('touchStart',[{x:200,y:440,id:0}]);await page.waitForTimeout(100);
+ for(let i=0;i<20;i++){await touch('touchMove',[{x:200+i*6,y:440+i*4,id:0}]);await page.waitForTimeout(20);}
+ await touch('touchEnd');await page.waitForTimeout(100);
+ const force=await page.evaluate(()=>waterLab.inspect());assert.ok(force.forceEnergy>1e-7&&force.finite);assert.deepEqual(force.camera,before.camera);
+ await page.screenshot({path:'captures/mobile-portrait.png'});
+ await page.locator('#touchMode').tap();await touch('touchStart',[{x:180,y:380,id:1}]);await touch('touchMove',[{x:240,y:410,id:1}]);await touch('touchEnd');await page.waitForTimeout(150);
+ const looked=await page.evaluate(()=>waterLab.inspect());assert.notEqual(looked.camera[4],before.camera[4]);
+ const button=await page.locator('[data-move="KeyW"]').boundingBox();
+ await touch('touchStart',[{x:button.x+button.width/2,y:button.y+button.height/2,id:2}]);await page.waitForTimeout(300);await touch('touchCancel');
+ const moved=await page.evaluate(()=>waterLab.inspect());assert.ok(Math.hypot(moved.camera[0]-looked.camera[0],moved.camera[2]-looked.camera[2])>.2);
+ await page.waitForTimeout(150);const stopped=await page.evaluate(()=>waterLab.inspect());assert.deepEqual(stopped.camera,moved.camera,'Cancelled touch must stop camera motion');
+ assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),1,'Constant wind must not regenerate random spectra');
+ await page.locator('#toggle').tap();await page.locator('#wind').evaluate(e=>{e.value='6';e.dispatchEvent(new Event('input',{bubbles:true}));});await page.waitForTimeout(100);
+ assert.equal(await page.evaluate(()=>waterDiagnostics.spectrumSeeds),2);await page.screenshot({path:'captures/mobile-settings.png'});await page.locator('#toggle').tap();
+ const benchPage=await browser.newPage({...devices['Pixel 7']});await benchPage.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?t=4');await benchPage.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});const after=await benchPage.evaluate(()=>waterLab.benchmark());await benchPage.close();
+ await page.setViewportSize({width:839,height:412});await page.waitForFunction(()=>waterDiagnostics.width>waterDiagnostics.height);
+ const landscape=await page.evaluate(()=>waterDiagnostics);assert.ok(Math.max(landscape.width,landscape.height)<=960);await page.screenshot({path:'captures/mobile-landscape.png'});
+ const fullCaustics=await page.evaluate(()=>waterLab.flatCausticsTest());const mobileCaustics=await page.evaluate(()=>waterLab.flatCausticsTest(true));assert.ok(fullCaustics.maxDeviationFromUniform<.001&&mobileCaustics.maxDeviationFromUniform<.001);for(const mean of force.causticMean)assert.ok(Math.abs(mean-1)<.01);
+ assert.deepEqual(errors,[]);
+ const iphone=await browser.newPage({...devices['iPhone 13']});
+ iphone.on('pageerror',e=>errors.push(String(e)));
+ await iphone.goto(process.env.WATER_URL||'http://127.0.0.1:5191/');await iphone.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});
+ assert.equal(await iphone.evaluate(()=>waterDiagnostics.mobile),true);
+ assert.ok((await iphone.locator('meta[name="viewport"]').getAttribute('content')).includes('viewport-fit=cover'));
+ await iphone.locator('#toggle').tap();assert.equal(await iphone.locator('#fly').textContent(),'Look around');
+ const panel=await iphone.locator('#panel').boundingBox();assert.ok(panel.x>=0&&panel.x+panel.width<=390);
+ await iphone.locator('#toggle').tap();await iphone.screenshot({path:'captures/mobile-iphone-portrait.png'});
+ await iphone.setViewportSize({width:844,height:390});await iphone.waitForFunction(()=>waterDiagnostics.width>waterDiagnostics.height);
+ const iphoneLandscape=await iphone.evaluate(()=>waterDiagnostics);assert.ok(Math.max(iphoneLandscape.width,iphoneLandscape.height)<=960);
+ await iphone.waitForFunction(start=>waterDiagnostics.frames>=start+15,iphoneLandscape.frames);
+ await iphone.screenshot({path:'captures/mobile-iphone-landscape.png'});await iphone.close();assert.deepEqual(errors,[]);
+ let baseline=null;try{baseline=JSON.parse(await readFile('captures/mobile-before.json','utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
+ const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,touchLook:true,touchFly:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
+ await writeFile('captures/mobile-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
+}finally{await browser.close();}

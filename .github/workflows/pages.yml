@@ -31,6 +31,7 @@ jobs:
           node --check scripts/serve.mjs
           node --check scripts/verify.mjs
           node --check scripts/force-verify.mjs
+          node --check scripts/mobile-verify.mjs
       - name: Compile CUDA kernels and build static site
         run: npm run build
       - uses: actions/upload-pages-artifact@v4
