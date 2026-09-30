@@ -17,6 +17,13 @@ $('toggle').onclick=()=>{resetSticks();keys.clear();padPointers.clear();document
 $('pause').onclick=()=>{playing=!playing;$('pause').textContent=playing?'Pause':'Resume';};$('reset').onclick=()=>reset=1;
 $('fly').onclick=()=>{if(touchDevice){touchLook=!touchLook;$('fly').textContent=touchLook?'Push water':'Look around';$('touchMode').textContent=touchLook?'Mode: Look':'Mode: Water';}else canvas.requestPointerLock?.();};
 $('touchMode').onclick=()=>$('fly').click();
+const fullscreenButton=$('fullscreen'),fullscreenRoot=document.documentElement;
+const fullscreenElement=()=>document.fullscreenElement||document.webkitFullscreenElement;
+function fullscreenLabel(){const active=!!fullscreenElement();fullscreenButton.setAttribute('aria-pressed',String(active));fullscreenButton.setAttribute('aria-label',active?'Exit fullscreen':'Enter fullscreen');fullscreenButton.title=active?'Exit fullscreen':'Enter fullscreen';fullscreenButton.querySelector('.fullscreen-label').textContent=active?' Exit fullscreen':' Fullscreen';}
+if(!(fullscreenRoot.requestFullscreen||fullscreenRoot.webkitRequestFullscreen)){fullscreenButton.disabled=true;fullscreenButton.title='Fullscreen is unavailable in this browser';fullscreenButton.setAttribute('aria-label',fullscreenButton.title);}
+fullscreenButton.onclick=async()=>{try{if(fullscreenElement()){await (document.exitFullscreen||document.webkitExitFullscreen).call(document);}else{await (fullscreenRoot.requestFullscreen||fullscreenRoot.webkitRequestFullscreen).call(fullscreenRoot);}fullscreenLabel();}catch{fullscreenButton.title='Fullscreen could not be opened. Tap to try again.';}};
+for(const event of ['fullscreenchange','webkitfullscreenchange'])document.addEventListener(event,fullscreenLabel);
+
 $('quality').onchange=()=>{adaptiveScale=1;frameAverage=0;adaptCount=0;};
 for(const id of ['shallows','ocean'])$(id).onclick=()=>{const ocean=id==='ocean';$('depth').value=ocean?8:1.4;$('energy').value=ocean?1.8:.8;reset=ocean?2:1;for(const p of ['shallows','ocean'])$(p).classList.toggle('active',p===id);labels();};
 addEventListener('keydown',e=>{if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
