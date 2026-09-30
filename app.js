@@ -5,7 +5,7 @@ if(touchDevice){document.body.classList.add('touch','clean');$('quality').value=
 let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=false,lastWind=-1;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
-let runtime,context,kernels={},width=0,height=0,image,surface,light,camera,fft,photons,disturbance,brush,seed;
+let runtime,context,kernels={},width=0,height=0,image,surface,light,camera,fft,photons,disturbance,brush,seed,twiddles;
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
 const fixed=new URLSearchParams(location.search).get('t');if(fixed!==null){time=Number(fixed);playing=false;}
 $('pause').textContent=playing?'Pause':'Resume';
@@ -80,10 +80,10 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('camera_step',{camera},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+(axis('ArrowRight','ArrowLeft')+sticks.look.x*1.8)*dt,lookY:lookY+(axis('ArrowUp','ArrowDown')-sticks.look.y*1.8)*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),reset}),[1,1,1]);reset=0;lookX=lookY=0;
  b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0}),[1,1,1]);forceMoved=false;
  b.dispatch(bind('force_modes',{disturbance,brush},{dt:playing?dt:0,depth:Number($('depth').value),clear:0}),[16,16,1]);
- const wind=Number($('wind').value);if(wind!==lastWind){b.dispatch(bind('seed_modes',{seed},{wind}),[16,16,3]);lastWind=wind;diagnostics.spectrumSeeds=(diagnostics.spectrumSeeds||0)+1;}
+ const wind=Number($('wind').value);if(wind!==lastWind){b.dispatch(bind('seed_modes',{seed,twiddles},{wind}),[16,16,3]);lastWind=wind;diagnostics.spectrumSeeds=(diagnostics.spectrumSeeds||0)+1;}
  b.dispatch(bind('spectrum',{output:fft[0],seed,disturbance},{time,depth:Number($('depth').value),energy:Number($('energy').value)}),[16,16,3]);
- let src=0;for(let axis=0;axis<2;axis++)for(let span=2;span<=128;span*=2){b.dispatch(bind('fft_stage',{input:fft[src],output:fft[1-src]},{span,axis}),[16,16,3]);src=1-src;}
- b.dispatch(bind('resolve',{input:fft[src],surface}),[16,16,3]);
+ for(let axis=0;axis<2;axis++)b.dispatch(bind('fft_local',{input:fft[axis],output:fft[1-axis],twiddles},{axis}),[128,1,3]);
+ b.dispatch(bind('resolve',{input:fft[0],surface}),[16,16,3]);
  b.dispatch(bind('caustic_clear',{photons}),[32,32,1]);
  const rays=mobileProfile()?256:512,dispersion=mobileProfile()?0:1;
  b.dispatch(bind('caustic_map',{surface,photons},{depth:Number($('depth').value),rays,dispersion}),[rays/8,rays/8,1]);
@@ -96,12 +96,12 @@ async function frame(now){
  try{
   const mobile=mobileProfile(),interval=mobile?1000/30:0;
   if(!busy&&!document.hidden&&(!last||now-last>=interval-.5)){
-   const dt=last?Math.min(.1,(now-last)/1000):1/(mobile?30:60);last=now;resize();if(playing)time+=dt;
+   const elapsed=last?(now-last)/1000:1/(mobile?30:60),dt=Math.min(.1,elapsed);last=now;resize();if(playing)time+=dt;
    const start=performance.now();compute(dt);await runtime.idle();
-   diagnostics.frameMs=performance.now()-start;diagnostics.frames++;diagnostics.ready=true;diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
+   diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;diagnostics.ready=true;diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
    frameAverage=frameAverage?frameAverage*.94+diagnostics.frameMs*.06:diagnostics.frameMs;
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
-   if(diagnostics.frames===1||diagnostics.frames%15===0)$('metrics').textContent=`${Math.round(1/dt)} FPS · ${width} × ${height} · ${speed.toFixed(1)} m/s`;
+   if(diagnostics.frames===1||diagnostics.frames%15===0)$('metrics').textContent=`${Math.round(diagnostics.fps)} FPS · ${width} × ${height} · ${speed.toFixed(1)} m/s`;
   }
   requestAnimationFrame(frame);
  }catch(e){fail(e);}
@@ -110,18 +110,20 @@ async function exclusive(fn){busy=true;try{await runtime.idle();return await fn(
 window.waterLab={
  async lookDown(){return exclusive(async()=>{const update=new Float32Array([0,-.95,0,0]);runtime.device.queue.writeBuffer(camera.gpuBuffer,16,update);compute(0);await runtime.idle();});},
  pause(){playing=false;},resume(){playing=true;},
- async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const l=await runtime.read(light),d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];for(let i=0;i<l.length;i+=4)for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/65536;return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c),causticMin:Math.min(...l.filter((v,i)=>i%4===0)),causticMax:Math.max(...l.filter((v,i)=>i%4===0)),adapter:runtime.describe()};});},
+ async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const l=await runtime.read(light),d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];for(let i=0;i<l.length;i+=4)for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/65536;return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin:Math.min(...l.filter((v,i)=>i%4===0)),causticMax:Math.max(...l.filter((v,i)=>i%4===0)),adapter:runtime.describe()};});},
  async seek(t){return exclusive(async()=>{playing=false;time=t;resize();compute(0);await runtime.idle();});},
  async screenshot(){return exclusive(async()=>{const p=await runtime.read(image,Uint32Array);return {width,height,rgba:Array.from(new Uint8Array(p.buffer))};});},
- async fftTest(){return exclusive(async()=>{
+ async fftTest(strategy='shared'){return exclusive(async()=>{
   const data=new Float32Array(49152*2),modes=[{x:3,z:7,c:0,re:.3,im:-.2},{x:51,z:89,c:0,re:.07,im:.11},{x:11,z:125,c:1,re:-.4,im:.15}];
   const reverse=x=>{let r=0;for(let i=0;i<7;i++){r=r*2+(x&1);x>>=1;}return r;};
   for(const m of modes){const idx=(m.c*16384+reverse(m.z)*128+reverse(m.x))*2;data[idx]=m.re;data[idx+1]=m.im;}
   const a=runtime.createBuffer(data),b=runtime.createBuffer(data.byteLength);const batch=runtime.batch();let src=0;const pair=[a,b];
-  for(let axis=0;axis<2;axis++)for(let span=2;span<=128;span*=2){batch.dispatch(bind('fft_stage',{input:pair[src],output:pair[1-src]},{span,axis}),[16,16,3]);src=1-src;}batch.submit();
+  if(strategy==='staged'){for(let axis=0;axis<2;axis++)for(let span=2;span<=128;span*=2){batch.dispatch(bind('fft_stage',{input:pair[src],output:pair[1-src]},{span,axis}),[16,16,3]);src=1-src;}}
+  else{for(let axis=0;axis<2;axis++){batch.dispatch(bind('fft_local',{input:pair[src],output:pair[1-src],twiddles},{axis}),[128,1,3]);src=1-src;}}
+  batch.submit();
   const result=await runtime.read(pair[src]);let maxError=0;
   for(let c=0;c<3;c++)for(let z=0;z<128;z++)for(let x=0;x<128;x++){let re=0,im=0;for(const m of modes){if(m.c!==c)continue;const angle=2*Math.PI*(m.x*x+m.z*z)/128;re+=m.re*Math.cos(angle)-m.im*Math.sin(angle);im+=m.re*Math.sin(angle)+m.im*Math.cos(angle);}const idx=(c*16384+z*128+x)*2;maxError=Math.max(maxError,Math.abs(result[idx]-re),Math.abs(result[idx+1]-im));}
-  runtime.destroyBuffer(a);runtime.destroyBuffer(b);kernels.fft_stage.clear();return {maxError,modes:3,axes:2,cascades:3,oracle:'Direct complex Fourier series evaluated independently in JavaScript for diagnostics only'};
+  runtime.destroyBuffer(a);runtime.destroyBuffer(b);kernels.fft_stage.clear();kernels.fft_local.clear();return {maxError,strategy,modes:3,axes:2,cascades:3,oracle:'Direct complex Fourier series evaluated independently in JavaScript for diagnostics only'};
  });},
  async flatCausticsTest(mobile=false){return exclusive(async()=>{
   const rays=mobile?256:512,dispersion=mobile?0:1,normalization=mobile?4096:16384;
@@ -133,11 +135,11 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','spectrum','fft_stage','resolve','caustic_clear','caustic_map','caustic_resolve','render'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','spectrum','fft_stage','resolve','caustic_clear','caustic_map','caustic_resolve','render']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }
- seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(65536*16);photons=runtime.createBuffer(65536*16);camera=runtime.createBuffer(32);brush=runtime.createBuffer(32);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
+ twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(65536*16);photons=runtime.createBuffer(65536*16);camera=runtime.createBuffer(80);brush=runtime.createBuffer(32);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
 }catch(e){fail(e);}

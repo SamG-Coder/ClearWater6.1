@@ -13,7 +13,7 @@ __device__ float3 blend(float3 a,float3 b,float t){return plus(scale(a,1-t),scal
 __device__ unsigned scramble(unsigned a){a^=a>>16;a*=2246822519u;a^=a>>13;a*=3266489917u;a^=a>>16;return a;}
 __device__ float randf(unsigned a){return ((float)(scramble(a)&16777215u)+.5f)/16777216;}
 __device__ float cell(float x,float z){return randf((unsigned)((int)x*92837111+(int)z*689287499));}
-__device__ int wrap128(int a){return (a%128+128)%128;}
+__device__ int wrap128(int a){return a&127;}
 __device__ int reverse7(int a){int b=0;for(int i=0;i<7;i++){b=b*2+(a&1);a=a>>1;}return b;}
 __device__ float patch(int c){return c==0?6.0f:(c==1?96.0f:24.0f);}
 __device__ float2 cmul(float2 a,float2 b){return make_float2(a.x*b.x-a.y*b.y,a.x*b.y+a.y*b.x);}
@@ -33,9 +33,10 @@ __device__ float2 initial(int x,int z,int c,float wind){
 }
 // Wind-dependent Gaussian spectra are cached; no log/exp/random generation
 // is repeated in the per-frame spectrum kernel.
-__global__ void seed_modes(float4 *seed,float wind){
+__global__ void seed_modes(float4 *seed,float2 *twiddles,float wind){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
  if(x>=128||z>=128||c>=3)return;
+ if(c==0&&z==0&&x<64){float angle=6.2831853f*(float)x/128;twiddles[x]=make_float2(cosf(angle),sinf(angle));}
  if(c==2){seed[c*16384+z*128+x]=make_float4(0,0,0,0);return;}
  float2 a=initial(x,z,c,wind),b=initial(wrap128(-x),wrap128(-z),c,wind);
  seed[c*16384+z*128+x]=make_float4(a.x,a.y,b.x,b.y);
@@ -66,6 +67,26 @@ __global__ void fft_stage(const float2 *input,float2 *output,int span,int axis){
  float sign=pos%span<half?1.0f:-1.0f;
  output[c*16384+z*128+x]=make_float2(a.x+sign*b.x,a.y+sign*b.y);
 }
+// One 64-lane workgroup transforms a complete 128-value row or column.
+// Each lane owns one disjoint butterfly, so stages synchronize in shared
+// memory instead of rereading and rewriting global buffers fourteen times.
+__global__ void fft_local(const float2 *input,float2 *output,const float2 *twiddles,int axis){
+ __shared__ float2 values[128];
+ __shared__ float2 rotation[64];
+ int lane=threadIdx.x,line=blockIdx.x,base=blockIdx.z*16384;
+ int first=axis==0?base+line*128+lane:base+lane*128+line;
+ int second=axis==0?first+64:first+8192;
+ values[lane]=input[first];values[lane+64]=input[second];rotation[lane]=twiddles[lane];
+ __syncthreads();
+ for(int span=2;span<=128;span*=2){
+  int half=span/2,j=lane&(half-1),a=(lane/half)*span+j,b=a+half;
+  float2 left=values[a],right=cmul(values[b],rotation[j*(128/span)]);
+  values[a]=make_float2(left.x+right.x,left.y+right.y);
+  values[b]=make_float2(left.x-right.x,left.y-right.y);
+  __syncthreads();
+ }
+ output[first]=values[lane];output[second]=values[lane+64];
+}
 __global__ void resolve(const float2 *input,float4 *surface){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
  if(x>=128||z>=128||c>=3)return;
@@ -90,12 +111,20 @@ __device__ float4 wave(const float4 *s,float x,float z,float distance){
 }
 // The camera state is GPU resident. JavaScript supplies raw input axes only.
 __global__ void camera_step(float4 *camera,float dt,float forward,float side,float up,float lookX,float lookY,float speed,int reset){
- if(reset>0){camera[0]=reset==2?make_float4(0,8,16,0):make_float4(0,2.6f,4,0);camera[1]=make_float4(0,reset==2?-.4f:-.32f,0,0);return;}
- float4 p=camera[0],r=camera[1];r.x+=lookX;r.y=fminf(1.5f,fmaxf(-1.5f,r.y+lookY));
+ float4 p=camera[0],r=camera[1];
+ if(reset>0){p=reset==2?make_float4(0,8,16,0):make_float4(0,2.6f,4,0);r=make_float4(0,reset==2?-.4f:-.32f,0,0);}
+ else{
+ r.x+=lookX;r.y=fminf(1.5f,fmaxf(-1.5f,r.y+lookY));
  float length=fmaxf(1,sqrtf(forward*forward+side*side+up*up));float d=dt*speed/length;
  p.x+=d*(sinf(r.x)*cosf(r.y)*forward+cosf(r.x)*side);
  p.z+=d*(-cosf(r.x)*cosf(r.y)*forward+sinf(r.x)*side);
- p.y=fmaxf(.45f,p.y+d*(sinf(r.y)*forward+up));camera[0]=p;camera[1]=r;
+ p.y=fmaxf(.45f,p.y+d*(sinf(r.y)*forward+up));
+ }
+ camera[0]=p;camera[1]=r;
+ float yawSin=sinf(r.x),yawCos=cosf(r.x),pitchSin=sinf(r.y),pitchCos=cosf(r.y);
+ camera[2]=make_float4(yawSin*pitchCos,pitchSin,-yawCos*pitchCos,0);
+ camera[3]=make_float4(yawCos,0,yawSin,0);
+ camera[4]=make_float4(-yawSin*pitchSin,pitchCos,yawCos*pitchSin,0);
 }
 // Project the pointer to the actual FFT surface on the GPU, retaining the
 // previous hit so a held drag injects force along its world-space path.
@@ -121,14 +150,15 @@ __global__ void force_modes(float4 *disturbance,const float4 *brush,float dt,flo
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=128||z>=128)return;
  int idx=z*128+x;float4 state=disturbance[idx];
  if(clear!=0||x==64||z==64||(x==0&&z==0)){disturbance[idx]=make_float4(0,0,0,0);return;}
+ float4 b=brush[0];float distance=sqrtf(b.z*b.z+b.w*b.w);
+ if(distance==0&&state.x==0&&state.y==0&&state.z==0&&state.w==0)return;
  int fx=x<64?x:x-128,fz=z<64?z:z-128;
  float kx=6.2831853f*(float)fx/24,kz=6.2831853f*(float)fz/24,kk=kx*kx+kz*kz,k=sqrtf(kk);
  float e=expf(-2*fminf(20,k*depth)),omega=sqrtf(9.81f*k*(1-e)/(1+e));
- float4 b=brush[0];float distance=sqrtf(b.z*b.z+b.w*b.w);
  float radius=.24f;
  float amplitude=-4.0f*fminf(.6f,distance)*6.2831853f*radius*radius/576*expf(-kk*radius*radius*.5f);
  float pr=0,pi=0;
- for(int j=0;j<4;j++){
+ if(distance>0)for(int j=0;j<4;j++){
   float t=((float)j+.5f)/4,px=b.x-b.z*(1-t),pz=b.y-b.w*(1-t);
   float phase=kx*px+kz*pz;pr+=cosf(phase)*.25f;pi-=sinf(phase)*.25f;
  }
@@ -142,8 +172,12 @@ __device__ float3 refractv(float3 d,float3 n,float eta){float c=dotv(d,n);return
 __device__ float3 sunDir(){return unit(vec(-.42f,.66f,-.63f));}
 __device__ float3 sky(float3 d){
  float v=powf(clamp01(d.y),.45f);float3 col=blend(vec(.38f,.55f,.68f),vec(.045f,.16f,.36f),v);
- float sun=fmaxf(0,dotv(d,sunDir()));col=plus(col,scale(vec(1,.83f,.55f),powf(sun,16000)*20+powf(sun,48)*.07f));
- float cirrus=powf(clamp01(.5f+.25f*sinf(d.x*28+d.z*17)+.25f*sinf(d.z*43-d.x*12)),8)*clamp01(d.y*3)*.22f;
+ // Explicit fixed powers avoid the compiler's software-f64 integer pow path.
+ float sun=fmaxf(0,dotv(d,sunDir())),s2=sun*sun,s4=s2*s2,s8=s4*s4,s16=s8*s8;
+ col=plus(col,scale(vec(1,.83f,.55f),powf(sun,16000)*20+s16*s16*s16*.07f));
+ float cloud=clamp01(.5f+.25f*sinf(d.x*28+d.z*17)+.25f*sinf(d.z*43-d.x*12));
+ float cloud2=cloud*cloud,cloud4=cloud2*cloud2;
+ float cirrus=cloud4*cloud4*clamp01(d.y*3)*.22f;
  return blend(col,vec(.94f,.96f,1),cirrus);
 }
 __device__ float bottom(float x,float z,float depth){return -depth+.10f*sinf(x*.19f)*sinf(z*.23f)+.04f*sinf(x*.63f+z*.31f);}
@@ -169,12 +203,17 @@ __device__ float3 seabed(float x,float z,float footprint){
   for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
    float cx=gx+(float)i,cz=gz+(float)j,seed=cell(cx,cz);
    float px=(cx+cell(cx+23,cz-87))/7,pz=(cz+cell(cx-71,cz+53))/7;
-   float dx=(x-px),dz=(z-pz),ang=seed*6.2831853f;
+   float dx=(x-px),dz=(z-pz),radius=.012f+.04f*seed;
+   // The largest possible deformed ellipse fits inside this circle.
+   // Outside it the original coverage is exactly zero, so skip the expensive
+   // angle/edge shading without changing any visible gravel.
+   if(dx*dx+dz*dz<=radius*radius*2.34f){
+   float ang=seed*6.2831853f;
    float rx=dx*cosf(ang)-dz*sinf(ang),rz=dx*sinf(ang)+dz*cosf(ang);
-   float radius=.012f+.04f*seed;
    float edge=1+.14f*sinf(atan2f(rz,rx)*5+seed*13)+.09f*sinf(atan2f(rz,rx)*9);
    float dist=sqrtf(rx*rx*1.6f+rz*rz*.65f)/(radius*edge);
    if(dist<nearest){nearest=dist;tone=seed;}
+   }
   }
   float coverage=clamp01((1-nearest)/fmaxf(.10f,footprint*35))*pocket*clamp01((.075f-footprint)/.035f);
   float3 rock=blend(vec(.055f,.063f,.054f),vec(.22f,.16f,.09f),tone);
@@ -241,16 +280,17 @@ __device__ float3 caustic(const float4 *light,float x,float z){
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
 __global__ void render(const float4 *surface,const float4 *light,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
- float4 pos=camera[0],rot=camera[1];float sx=(2*((float)x+.5f)/(float)width-1)*(float)width/(float)height;
- float sy=1-2*((float)y+.5f)/(float)height;float3 f=vec(sinf(rot.x)*cosf(rot.y),sinf(rot.y),-cosf(rot.x)*cosf(rot.y));
- float3 r=vec(cosf(rot.x),0,sinf(rot.x)),u=vec(-sinf(rot.x)*sinf(rot.y),cosf(rot.y),cosf(rot.x)*sinf(rot.y));
+ float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*((float)x+.5f)/(float)width-1)*(float)width/(float)height;
+ float sy=1-2*((float)y+.5f)/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
+ float3 r=vec(right.x,right.y,right.z),u=vec(up.x,up.y,up.z);
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=sky(ray);
  if(ray.y<-.0005f){
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<4;i++){w=wave(surface,pos.x+ray.x*t,pos.z+ray.z*t,t);t=mixf(t,(w.x-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  w=wave(surface,p.x,p.z,t);float3 n=unit(vec(-w.y,1,-w.z));float nv=fmaxf(.02f,-dotv(n,ray));
- float fresnel=.02037f+.97963f*powf(1-clamp01(nv),5);
+ float grazing=1-clamp01(nv),grazing2=grazing*grazing;
+ float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflected=sky(minus(ray,scale(n,2*dotv(ray,n))));
  float3 transmitted=refractv(ray,n,.7502f);float travel=(-depth-p.y)/fminf(-.1f,transmitted.y);
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
