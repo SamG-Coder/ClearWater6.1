@@ -12,6 +12,7 @@ try{
  await page.waitForFunction(()=>waterDiagnostics.frames>=3||waterDiagnostics.errors.length);
  const initial=await page.evaluate(()=>waterDiagnostics);
  assert.deepEqual(initial.errors,[]);assert.equal(initial.mobile,true);assert.equal(initial.targetFps,30);assert.equal(initial.photonRays,256);assert.equal(initial.readbackBytes,0);
+ assert.equal(initial.lightChannels,1);assert.equal(initial.lightStorageBytes,65536*4+16);assert.equal(initial.photonStorageBytes,65536*4);
  assert.equal(initial.activeCascades,2,'The exactly-zero force field should need no FFT before interaction');
  const submissions=await page.evaluate(()=>({count:testQueueSubmissions,frames:waterDiagnostics.frames}));assert.ok(submissions.count>=submissions.frames&&submissions.count<=submissions.frames+1,'Rendering must use one GPU submission per frame, including canvas transfer');
  assert.ok(Math.max(initial.width,initial.height)<=960);assert.equal(await page.locator('#panel').isVisible(),false);assert.equal(await page.locator('#touchControls').isVisible(),true);
@@ -45,6 +46,16 @@ try{
  await page.setViewportSize({width:839,height:412});await page.waitForFunction(()=>waterDiagnostics.width>waterDiagnostics.height);
  const landscape=await page.evaluate(()=>waterDiagnostics);assert.ok(Math.max(landscape.width,landscape.height)<=960);await page.screenshot({path:'captures/mobile-landscape.png'});
  const fullCaustics=await page.evaluate(()=>waterLab.flatCausticsTest());const mobileCaustics=await page.evaluate(()=>waterLab.flatCausticsTest(true));assert.ok(fullCaustics.maxDeviationFromUniform<.001&&mobileCaustics.maxDeviationFromUniform<.001);for(const mean of force.causticMean)assert.ok(Math.abs(mean-1)<.01);
+ // Switching profiles replaces buffer layouts, including at matching sizes.
+ // Check both directions after waves and diagnostic kernels have run.
+ for(const profile of ['768','mobile']){
+  await page.locator('#quality').evaluate((e,value)=>{e.value=value;e.dispatchEvent(new Event('change'));},profile);
+  await page.evaluate(()=>waterLab.seek(4));const state=await page.evaluate(()=>waterLab.inspect()),layout=await page.evaluate(()=>waterDiagnostics);
+  assert.ok(state.finite);assert.equal(layout.lightChannels,profile==='mobile'?1:3);
+  assert.equal(layout.lightStorageBytes,profile==='mobile'?65536*4+16:65536*16+4);
+  assert.equal(layout.photonStorageBytes,profile==='mobile'?65536*4:65536*16);
+  for(const mean of state.causticMean)assert.ok(Math.abs(mean-1)<.01);
+ }
  assert.deepEqual(errors,[]);
  const iphone=await browser.newPage({...devices['iPhone 13']});
  iphone.on('pageerror',e=>errors.push(String(e)));
@@ -59,6 +70,6 @@ try{
  await iphone.waitForFunction(start=>waterDiagnostics.frames>=start+15,iphoneLandscape.frames);
  await iphone.screenshot({path:'captures/mobile-iphone-landscape.png'});await iphone.close();assert.deepEqual(errors,[]);
  let baseline=null;try{baseline=JSON.parse(await readFile('captures/mobile-before.json','utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
- const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,touchLook:true,touchFly:true,simultaneousMoveAndDragLook:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
+ const result={environment:'Pixel 7 and iPhone 13 touch/viewport emulation in desktop Chromium on NVIDIA GPU; not physical phone hardware or Safari',before:baseline,after,pixelReduction:baseline?1-after.width*after.height/(baseline.width*baseline.height):null,forceHeight:force.disturbanceMax,lightingBufferBytes:initial.lightStorageBytes+initial.photonStorageBytes,profileSwitch:true,touchLook:true,touchFly:true,simultaneousMoveAndDragLook:true,touchCancelStopsMotion:true,landscape:{width:landscape.width,height:landscape.height},iphoneLayout:true,iphoneLandscape:{width:iphoneLandscape.width,height:iphoneLandscape.height},errors};
  await writeFile('captures/mobile-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}

@@ -11,7 +11,8 @@ __device__ float dotv(float3 a,float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 __device__ float3 unit(float3 a){return scale(a,rsqrtf(fmaxf(.0000001f,dotv(a,a))));}
 __device__ float3 blend(float3 a,float3 b,float t){return plus(scale(a,1-t),scale(b,t));}
 __device__ unsigned scramble(unsigned a){a^=a>>16;a*=2246822519u;a^=a>>13;a*=3266489917u;a^=a>>16;return a;}
-__device__ float randf(unsigned a){return ((float)(scramble(a)&16777215u)+.5f)/16777216;}
+// Scaling these bounded positive floats by 2^-24 is exact in binary32.
+__device__ float randf(unsigned a){return ((float)(scramble(a)&16777215u)+.5f)*.000000059604644775390625f;}
 __device__ float cell(float x,float z){return randf((unsigned)((int)x*92837111+(int)z*689287499));}
 __device__ int wrap128(int a){return a&127;}
 __device__ int reverse7(int a){int b=0;for(int i=0;i<7;i++){b=b*2+(a&1);a=a>>1;}return b;}
@@ -196,7 +197,9 @@ __device__ float3 sky(float3 d){
  float v=positive_power(clamp01(d.y),.45f);float3 col=blend(vec(.38f,.55f,.68f),vec(.045f,.16f,.36f),v);
  // Explicit fixed powers avoid the compiler's software-f64 integer pow path.
  float sun=fmaxf(0,dotv(d,sunDir())),s2=sun*sun,s4=s2*s2,s8=s4*s4,s16=s8*s8;
- col=plus(col,scale(vec(1,.83f,.55f),positive_power(sun,16000)*20+s16*s16*s16*.07f));
+ // Below .99 the disk power is smaller than the minimum float value.
+ float sunDisk=sun>.99f?positive_power(sun,16000):0;
+ col=plus(col,scale(vec(1,.83f,.55f),sunDisk*20+s16*s16*s16*.07f));
  float cloud=clamp01(.5f+.25f*sinf(d.x*28+d.z*17)+.25f*sinf(d.z*43-d.x*12));
  float cloud2=cloud*cloud,cloud4=cloud2*cloud2;
  float cirrus=cloud4*cloud4*clamp01(d.y*3)*.22f;
@@ -278,7 +281,7 @@ __global__ void caustic_map(const float4 *surface,unsigned *photons,float depth,
   }
  }
 }
-__global__ void caustic_resolve(const unsigned *photons,float4 *light,float normalization,int dispersion){
+__global__ void caustic_resolve(const unsigned *photons,float4 *light,float *monoLight,float normalization,int dispersion){
  // This kernel always launches a complete 32 x 32 grid of 8 x 8 groups.
  __shared__ unsigned tile[100];
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
@@ -300,18 +303,24 @@ __global__ void caustic_resolve(const unsigned *photons,float4 *light,float norm
    int index=((int)threadIdx.y+j+1)*10+(int)threadIdx.x+i+1;
    filtered+=(float)tile[index]*weight;
   }
-  r=filtered/(16*normalization);
- }else{r=(float)photons[id]/normalization;}
- float g=dispersion!=0?(float)photons[id+1]/normalization:r,b=dispersion!=0?(float)photons[id+2]/normalization:r;
- light[z*256+x]=make_float4(r,g,b,1);
+  // Supported ray grids give a power-of-two denominator; division is exact.
+  r=__fdividef(filtered,16*normalization);
+ }else{r=__fdividef((float)photons[id],normalization);}
+ float g=dispersion!=0?__fdividef((float)photons[id+1],normalization):r,b=dispersion!=0?__fdividef((float)photons[id+2],normalization):r;
+ if(dispersion==0)monoLight[z*256+x]=r;else light[z*256+x]=make_float4(r,g,b,1);
 }
-__device__ float3 caustic(const float4 *light,float x,float z){
+__device__ float3 caustic(const float4 *light,const float *monoLight,float x,float z,int dispersion){
  float u=fract(x/6)*256,v=fract(z/6)*256;int ix=(int)floorf(u),iz=(int)floorf(v);float a=fract(u),b=fract(v);
+ // Mobile sunlight has identical RGB channels. Read and interpolate it once.
+ if(dispersion==0){
+  float p=monoLight[iz*256+ix],q=monoLight[iz*256+(ix+1)%256],r=monoLight[((iz+1)%256)*256+ix],t=monoLight[((iz+1)%256)*256+(ix+1)%256];
+  float value=mixf(mixf(p,q,a),mixf(r,t,a),b);return vec(value,value,value);
+ }
  float4 p=light[iz*256+ix],q=light[iz*256+(ix+1)%256],r=light[((iz+1)%256)*256+ix],t=light[((iz+1)%256)*256+(ix+1)%256];
  return vec(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b));
 }
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
-__global__ void render(const float4 *surface,const float4 *light,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive){
+__global__ void render(const float4 *surface,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*((float)x+.5f)/(float)width-1)*(float)width/(float)height;
  float sy=1-2*((float)y+.5f)/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -329,7 +338,7 @@ __global__ void render(const float4 *surface,const float4 *light,const float4 *c
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
- travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,pixelFootprint),ca=caustic(light,bx,bz);
+ travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,pixelFootprint),ca=caustic(light,monoLight,bx,bz,dispersion);
  // Light travels down through the water before returning along the view ray.
  float opticalDistance=travel+forward.w;
  ca=blend(vec(1,1,1),ca,causticDetail*right.w);
