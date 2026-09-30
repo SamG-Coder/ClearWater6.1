@@ -112,8 +112,10 @@ __device__ float4 sample(const float4 *s,float x,float z,int c){
  float4 r=s[base+wrap128(iz+1)*128+wrap128(ix)],t=s[base+wrap128(iz+1)*128+wrap128(ix+1)];
  return make_float4(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b),0);
 }
-__device__ float4 wave(const float4 *s,float x,float z,float fade){
- float4 a=sample(s,x,z,0),b=sample(s,x,z,1),d=sample(s,x,z,2);
+// An untouched pressure cascade is zero. Skip its bilinear reads until the
+// first gesture; preserve the same additions and fading in both paths.
+__device__ float4 wave(const float4 *s,float x,float z,float fade,int pressureActive){
+ float4 a=sample(s,x,z,0),b=sample(s,x,z,1),d=pressureActive!=0?sample(s,x,z,2):make_float4(0,0,0,0);
  // Fade unresolved short displacement as well as its normal near the horizon.
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
@@ -122,8 +124,8 @@ __device__ float sample_height(const float4 *s,float x,float z,int c){
  float a=fract(u),b=fract(v);
  return mixf(mixf(s[base+wrap128(iz)*128+wrap128(ix)].x,s[base+wrap128(iz)*128+wrap128(ix+1)].x,a),mixf(s[base+wrap128(iz+1)*128+wrap128(ix)].x,s[base+wrap128(iz+1)*128+wrap128(ix+1)].x,a),b);
 }
-__device__ float wave_height(const float4 *s,float x,float z,float distance){
- float a=sample_height(s,x,z,0),b=sample_height(s,x,z,1),d=sample_height(s,x,z,2);
+__device__ float wave_height(const float4 *s,float x,float z,float distance,int pressureActive){
+ float a=sample_height(s,x,z,0),b=sample_height(s,x,z,1),d=pressureActive!=0?sample_height(s,x,z,2):0;
  float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
 }
 // Camera basis and depth-only optical factors are computed once per frame.
@@ -146,7 +148,7 @@ __global__ void camera_step(float4 *camera,float dt,float forward,float side,flo
 }
 // Project the pointer to the actual FFT surface on the GPU, retaining the
 // previous hit so a held drag injects force along its world-space path.
-__global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *brush,float pointerX,float pointerY,float aspect,int held,int moving){
+__global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *brush,float pointerX,float pointerY,float aspect,int held,int moving,int pressureActive){
  float4 old=brush[1];brush[0]=make_float4(0,0,0,0);
  if(held==0){brush[1]=make_float4(old.x,old.y,0,0);return;}
  float4 p=camera[0],r=camera[1];
@@ -155,7 +157,7 @@ __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *br
  float3 ray=unit(plus(f,plus(scale(right,pointerX*aspect*.65f),scale(up,pointerY*.65f))));
  if(ray.y>-.06f){brush[1]=make_float4(old.x,old.y,0,0);return;}
  float t=-p.y/ray.y;
- for(int j=0;j<4;j++){float h=wave_height(surface,p.x+ray.x*t,p.z+ray.z*t,t);t=mixf(t,(h-p.y)/ray.y,.75f);}
+ for(int j=0;j<4;j++){float h=wave_height(surface,p.x+ray.x*t,p.z+ray.z*t,t,pressureActive);t=mixf(t,(h-p.y)/ray.y,.75f);}
  float x=p.x+ray.x*t,z=p.z+ray.z*t;
  float dx=old.z>.5f&&moving!=0?x-old.x:0,dz=old.z>.5f&&moving!=0?z-old.y:0;
  // Bound a single event's travel so a camera teleport cannot create an explosion.
@@ -309,7 +311,7 @@ __device__ float3 caustic(const float4 *light,float x,float z){
  return vec(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b));
 }
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
-__global__ void render(const float4 *surface,const float4 *light,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view){
+__global__ void render(const float4 *surface,const float4 *light,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*((float)x+.5f)/(float)width-1)*(float)width/(float)height;
  float sy=1-2*((float)y+.5f)/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -317,10 +319,10 @@ __global__ void render(const float4 *surface,const float4 *light,const float4 *c
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
  if(ray.y<-.0005f){
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<4;i++){float h=wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t);t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ for(int i=0;i<4;i++){float h=wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/(float)height;
- w=wave(surface,p.x,p.z,causticDetail);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=wave(surface,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));

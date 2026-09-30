@@ -89,7 +89,7 @@ function compute(dt,timestampWrites){
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
  b.dispatch(bind('camera_step',{camera},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),reset,depth}),[1,1,1]);reset=0;lookX=lookY=0;
- b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0}),[1,1,1]);forceMoved=false;
+ b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
  if(depth!==lastDepth){b.dispatch(bind('prepare_modes',{motion},{depth}),[16,16,3]);lastDepth=depth;diagnostics.dispersionSeeds=(diagnostics.dispersionSeeds||0)+1;}
  if(disturbanceActive)b.dispatch(bind('force_modes',{disturbance,brush,motion},{dt:playing?dt:0,clear:0}),[16,16,1]);
  if(wind!==lastWind){b.dispatch(bind('seed_modes',{seed,twiddles},{wind}),[16,16,3]);lastWind=wind;diagnostics.spectrumSeeds=(diagnostics.spectrumSeeds||0)+1;}
@@ -99,7 +99,7 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('caustic_clear',{photons},{dispersion}),[32,32,1]);
  b.dispatch(bind('caustic_map',{surface,photons},{depth,rays,dispersion}),[rays/8,rays/8,1]);
  b.dispatch(bind('caustic_resolve',{photons,light},{normalization:4096*(rays/256)**2,dispersion}),[32,32,1]);
- b.dispatch(bind('render',{surface,light,camera,image},{width,height,depth,exposure,view}),[width/8,height/8,1]);
+ b.dispatch(bind('render',{surface,light,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
 async function frame(now){
