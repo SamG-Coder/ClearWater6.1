@@ -112,9 +112,8 @@ __device__ float4 sample(const float4 *s,float x,float z,int c){
  float4 r=s[base+wrap128(iz+1)*128+wrap128(ix)],t=s[base+wrap128(iz+1)*128+wrap128(ix+1)];
  return make_float4(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b),0);
 }
-__device__ float4 wave(const float4 *s,float x,float z,float distance){
+__device__ float4 wave(const float4 *s,float x,float z,float fade){
  float4 a=sample(s,x,z,0),b=sample(s,x,z,1),d=sample(s,x,z,2);
- float fade=1/(1+distance*distance*.0008f);
  // Fade unresolved short displacement as well as its normal near the horizon.
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
@@ -127,8 +126,9 @@ __device__ float wave_height(const float4 *s,float x,float z,float distance){
  float a=sample_height(s,x,z,0),b=sample_height(s,x,z,1),d=sample_height(s,x,z,2);
  float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
 }
-// The camera state is GPU resident. JavaScript supplies raw input axes only.
-__global__ void camera_step(float4 *camera,float dt,float forward,float side,float up,float lookX,float lookY,float speed,int reset){
+// Camera basis and depth-only optical factors are computed once per frame.
+// Basis w components carry optical factors; xyz remain camera directions.
+__global__ void camera_step(float4 *camera,float dt,float forward,float side,float up,float lookX,float lookY,float speed,int reset,float depth){
  float4 p=camera[0],r=camera[1];
  if(reset>0){p=reset==2?make_float4(0,8,16,0):make_float4(0,2.6f,4,0);r=make_float4(0,reset==2?-.4f:-.32f,0,0);}
  else{
@@ -140,8 +140,8 @@ __global__ void camera_step(float4 *camera,float dt,float forward,float side,flo
  }
  camera[0]=p;camera[1]=r;
  float yawSin=sinf(r.x),yawCos=cosf(r.x),pitchSin=sinf(r.y),pitchCos=cosf(r.y);
- camera[2]=make_float4(yawSin*pitchCos,pitchSin,-yawCos*pitchCos,0);
- camera[3]=make_float4(yawCos,0,yawSin,0);
+ camera[2]=make_float4(yawSin*pitchCos,pitchSin,-yawCos*pitchCos,depth/.86f);
+ camera[3]=make_float4(yawCos,0,yawSin,expf(-depth*.055f));
  camera[4]=make_float4(-yawSin*pitchSin,pitchCos,yawCos*pitchSin,0);
 }
 // Project the pointer to the actual FFT surface on the GPU, retaining the
@@ -186,7 +186,8 @@ __global__ void force_modes(float4 *disturbance,const float4 *brush,const float 
  float co=cosf(omega*dt),si=sinf(omega*dt),damping=expf(-decay*dt);
  disturbance[idx]=make_float4((state.x*co+state.z/omega*si)*damping,(state.y*co+state.w/omega*si)*damping,(state.z*co-state.x*omega*si)*damping,(state.w*co-state.y*omega*si)*damping);
 }
-__device__ float3 refractv(float3 d,float3 n,float eta){float c=dotv(d,n);return minus(scale(d,eta),scale(n,eta*c+sqrtf(fmaxf(0,1-eta*eta*(1-c*c)))));}
+__device__ float3 refract_cosine(float3 d,float3 n,float eta,float c){return minus(scale(d,eta),scale(n,eta*c+sqrtf(fmaxf(0,1-eta*eta*(1-c*c)))));}
+__device__ float3 refractv(float3 d,float3 n,float eta){return refract_cosine(d,n,eta,dotv(d,n));}
 __device__ float3 sunDir(){return unit(vec(-.42f,.66f,-.63f));}
 __device__ float positive_power(float value,float exponent){return value>0?exp2f(log2f(value)*exponent):0;}
 __device__ float3 sky(float3 d){
@@ -229,7 +230,8 @@ __device__ float3 seabed(float x,float z,float footprint){
    if(dx*dx+dz*dz<=radius*radius*2.34f){
    float ang=seed*6.2831853f;
    float rx=dx*cosf(ang)-dz*sinf(ang),rz=dx*sinf(ang)+dz*cosf(ang);
-   float edge=1+.14f*sinf(atan2f(rz,rx)*5+seed*13)+.09f*sinf(atan2f(rz,rx)*9);
+   float angle=atan2f(rz,rx);
+   float edge=1+.14f*sinf(angle*5+seed*13)+.09f*sinf(angle*9);
    float dist=sqrtf(rx*rx*1.6f+rz*rz*.65f)/(radius*edge);
    if(dist<nearest){nearest=dist;tone=seed;}
    }
@@ -317,23 +319,22 @@ __global__ void render(const float4 *surface,const float4 *light,const float4 *c
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<4;i++){float h=wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t);t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
- w=wave(surface,p.x,p.z,t);float3 n=unit(vec(-w.y,1,-w.z));float nv=fmaxf(.02f,-dotv(n,ray));
+ float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/(float)height;
+ w=wave(surface,p.x,p.z,causticDetail);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
- float3 reflected=sky(minus(ray,scale(n,2*dotv(ray,n))));
- float3 transmitted=refractv(ray,n,.7502f);float travel=(-depth-p.y)/fminf(-.1f,transmitted.y);
+ float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));
+ float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
- for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/fminf(-.1f,transmitted.y);bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
- travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,t/(float)height),ca=caustic(light,bx,bz);
+ for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,pixelFootprint),ca=caustic(light,bx,bz);
  // Light travels down through the water before returning along the view ray.
- float opticalDistance=travel+depth/.86f;
- float causticDetail=1/(1+t*t*.0008f);
- ca=blend(vec(1,1,1),ca,causticDetail*expf(-depth*.055f));
+ float opticalDistance=travel+forward.w;
+ ca=blend(vec(1,1,1),ca,causticDetail*right.w);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
  col=blend(through,reflected,fresnel);
  float3 halfv=unit(minus(sunDir(),ray));
- float pixelFootprint=t/(float)height;
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec));

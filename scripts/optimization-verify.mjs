@@ -4,7 +4,7 @@ import {mkdir,writeFile} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
 // Reference only our own last published source, never other water examples.
-const referenceCommit=process.env.WATER_REFERENCE_COMMIT||'564a4c0',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'});
+const referenceCommit=process.env.WATER_REFERENCE_COMMIT||'dbfa572',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'});
 const oldHtml=execFileSync('git',['show',`${referenceCommit}:index.html`],{encoding:'utf8'});
 const artifacts=new Map();for(const m of oldSource.matchAll(/__global__ void (\w+)/g)){const name=m[1];artifacts.set(name,JSON.stringify(serializableArtifact(compile(oldSource,{entry:name,workgroupSize:name==='fft_local'?[64,1,1]:['camera_step','brush_pick'].includes(name)?[1,1,1]:[8,8,1]}))));}
 const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']}),base=process.env.WATER_URL||'http://127.0.0.1:5191/';
