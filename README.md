@@ -166,3 +166,5 @@ Run `npm run test:weather` for solar-period/season checks, both poles and longit
 Click **Fly camera** to lock the mouse. The button and status message confirm **Flying**. Wheel-up speeds up and wheel-down slows down in this mode. With the mouse free, the wheel zooms between the sea and space; Ctrl + wheel also zooms while flying. If mouse lock is refused, the UI explains the refusal and enables drag-to-look with WASD and speed scrolling. Escape exits either fly mode.
 
 Distant water uses wind-dependent rough reflection, broad solar glints, and footprint-filtered irregular swell shading. The atmosphere uses 12 PC or 8 mobile integration samples, with denser sampling near the ground in orbital views. Ocean, atmospheric limb, and stars remain at the selected output resolution; the expensive cloud volume uses its separate cache.
+
+The weather release resets the image/shader optimization baseline to `95085db`. It accepts the new moving sunlight, weather response, clouds and distant shading while preserving exact image comparisons for later optimization passes.
