@@ -48,10 +48,10 @@ try{
  const fullCaustics=await page.evaluate(()=>waterLab.flatCausticsTest());const mobileCaustics=await page.evaluate(()=>waterLab.flatCausticsTest(true));assert.ok(fullCaustics.maxDeviationFromUniform<.001&&mobileCaustics.maxDeviationFromUniform<.001);for(const mean of force.causticMean)assert.ok(Math.abs(mean-1)<.01);
  // Switching profiles replaces buffer layouts, including at matching sizes.
  // Check both directions after waves and diagnostic kernels have run.
- for(const profile of ['768','mobile']){
+ for(const profile of ['1152','768','mobile']){
   await page.locator('#quality').evaluate((e,value)=>{e.value=value;e.dispatchEvent(new Event('change'));},profile);
   await page.evaluate(()=>waterLab.seek(4));const state=await page.evaluate(()=>waterLab.inspect()),layout=await page.evaluate(()=>waterDiagnostics);
-  assert.ok(state.finite);assert.equal(layout.lightChannels,profile==='mobile'?1:3);
+  assert.ok(state.finite);assert.equal(layout.pixelSamples,profile==='1152'?4:1);assert.equal(layout.lightChannels,profile==='mobile'?1:3);
   assert.equal(layout.lightStorageBytes,profile==='mobile'?65536*4+16:65536*16+4);
   assert.equal(layout.photonStorageBytes,profile==='mobile'?65536*4:65536*16);
   for(const mean of state.causticMean)assert.ok(Math.abs(mean-1)<.01);

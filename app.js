@@ -3,7 +3,7 @@ const assetVersion=new URL(import.meta.url).searchParams.get('v')||'local';
 const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
 if(touchDevice){document.body.classList.add('touch','clean');$('quality').value='mobile';$('toggle').textContent='Settings';$('fly').textContent='Push water';$('touchMode').textContent='Mode: Look';}
-let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=touchDevice,lastWind=-1,lastDepth=-1,disturbanceActive=false;
+let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=touchDevice,lastWind=-1,lastDepth=-1,disturbanceActive=false,pcSampleOverride=0;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
 let runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
@@ -77,7 +77,7 @@ function resize(){
   runtime.destroyBuffer(light);runtime.destroyBuffer(monoLight);runtime.destroyBuffer(photons);
   light=runtime.createBuffer(mobile?16:65536*16);monoLight=runtime.createBuffer(mobile?65536*4:4);photons=runtime.createBuffer(mobile?65536*4:65536*16);
   diagnostics.lightChannels=lightChannels;diagnostics.lightStorageBytes=mobile?65536*4+16:65536*16+4;diagnostics.photonStorageBytes=mobile?65536*4:65536*16;
-  kernels.caustic_clear.clear();kernels.caustic_map.clear();kernels.caustic_resolve.clear();kernels.render.clear();
+  kernels.caustic_clear.clear();kernels.caustic_map.clear();kernels.caustic_resolve.clear();kernels.render.clear();kernels.render_pc.clear();
  }
 
  const longest=mobile?960*adaptiveScale:Infinity;
@@ -87,12 +87,13 @@ function resize(){
  if(w===width&&h===height)return;
  if(image)runtime.destroyBuffer(image);width=w;height=h;canvas.width=w;canvas.height=h;image=runtime.createBuffer(w*h*4);
  context.configure({device:runtime.device,format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT,alphaMode:'opaque'});
- diagnostics.width=w;diagnostics.height=h;kernels.render.clear();
+ diagnostics.width=w;diagnostics.height=h;kernels.render.clear();kernels.render_pc.clear();
 }
 function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars);}
 function compute(dt,timestampWrites){
  const b=runtime.batch({timestampWrites});
  const depth=Number($('depth').value),wind=Number($('wind').value),energy=Number($('energy').value),exposure=Number($('exposure').value),view=Number($('view').value),rays=mobileProfile()?256:512,dispersion=mobileProfile()?0:1;
+ const samples=mobileProfile()?1:(pcSampleOverride||($('quality').value==='768'?1:4));diagnostics.pixelSamples=samples;
  if(held&&forceMoved)disturbanceActive=true;
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
@@ -107,7 +108,7 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('caustic_clear',{photons},{dispersion}),[32,32,1]);
  b.dispatch(bind('caustic_map',{surface,photons},{depth,rays,dispersion}),[rays/8,rays/8,1]);
  b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/256)**2,dispersion}),[32,32,1]);
- b.dispatch(bind('render',{surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion}),[width/32,height/2,1]);
+ b.dispatch(bind(samples===4?'render_pc':'render',{surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
 async function frame(now){
@@ -127,6 +128,7 @@ async function frame(now){
 }
 async function exclusive(fn){busy=true;try{await runtime.idle();return await fn();}finally{busy=false;}}
 window.waterLab={
+ async setPixelSamples(count){if(count!==0&&count!==1&&count!==4)throw Error('Pixel samples must be 0 (automatic), 1 or 4');return exclusive(async()=>{pcSampleOverride=count;compute(0);await runtime.idle();});},
  async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},
  async lookDown(){return exclusive(async()=>{const update=new Float32Array([0,-.95,0,0]);runtime.device.queue.writeBuffer(camera.gpuBuffer,16,update);compute(0);await runtime.idle();});},
  pause(){playing=false;},resume(){playing=true;},
@@ -155,9 +157,9 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }

@@ -320,17 +320,16 @@ __device__ float3 caustic(const float4 *light,const float *monoLight,float x,flo
  return vec(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b));
 }
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
-__global__ void render(const float4 *surface,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion){
- int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
- float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*((float)x+.5f)/(float)width-1)*(float)width/(float)height;
- float sy=1-2*((float)y+.5f)/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
+__device__ float3 shade_pixel(const float4 *surface,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,float pixelX,float pixelY,float sampleScale){
+ float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
+ float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
  float3 r=vec(right.x,right.y,right.z),u=vec(up.x,up.y,up.z);
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
  if(ray.y<-.0005f){
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<4;i++){float h=wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
- float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/(float)height;
+ float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
  w=wave(surface,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
@@ -353,6 +352,26 @@ __global__ void render(const float4 *surface,const float4 *light,const float *mo
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray);}
  float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
+ return col;
+}
+__device__ unsigned pack_color(float3 col){
  unsigned rr=(unsigned)(positive_power(film(col.x),.454545f)*255),gg=(unsigned)(positive_power(film(col.y),.454545f)*255),bb=(unsigned)(positive_power(film(col.z),.454545f)*255);
- image[y*width+x]=rr|(gg<<8)|(bb<<16)|4278190080u;
+ return rr|(gg<<8)|(bb<<16)|4278190080u;
+}
+// Keep the one-sample shader separate from the PC supersampling path.
+__global__ void render(const float4 *surface,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
+ float3 col=shade_pixel(surface,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,(float)x+.5f,(float)y+.5f,1);
+ image[y*width+x]=pack_color(col);
+}
+// PC spatial supersampling: average linear radiance before tone mapping.
+// FFT and lighting are shared across all four samples; no extra framebuffer.
+__global__ void render_pc(const float4 *surface,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
+ float3 col=vec(0,0,0);
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){
+  float3 sample=shade_pixel(surface,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
+  col=plus(col,sample);
+ }
+ image[y*width+x]=pack_color(scale(col,.25f));
 }
