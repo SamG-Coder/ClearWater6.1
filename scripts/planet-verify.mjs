@@ -6,7 +6,7 @@ await mkdir('captures',{recursive:true});const R=6371000,errors=[];
 const base=process.env.WATER_URL||'http://127.0.0.1:5191/';
 try{
  const page=await browser.newPage({viewport:{width:1440,height:900}});page.on('pageerror',e=>errors.push(String(e)));
- await page.goto(base+'?t=4');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
+ await page.goto(base+'?t=4&geology=study');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
  assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
  const points=[];for(const h of [.45,2.6,100,10000,400000,R,500000000])for(const y of [-1,-.85,-.5,-.1,-.01,.1])points.push([Math.fround(h),Math.fround(Math.sqrt(1-y*y)),Math.fround(y),0]);
  const roots=await page.evaluate(p=>waterLab.geometryTest(p),points);let maxRelativeError=0;
@@ -44,7 +44,7 @@ try{
  await page.setViewportSize({width:1440,height:900});await page.locator('#quality').evaluate(e=>{e.value='1152';e.dispatchEvent(new Event('change'));});
  for(const altitude of [400000,10000,300,60,2.6]){await page.evaluate(h=>waterLab.setAltitude(h),altitude);await page.evaluate(()=>waterLab.lookAt(0,-.32));const s=await page.evaluate(()=>waterLab.planetState());assert.ok(s.finite);await page.screenshot({path:`captures/planet-altitude-${altitude}.png`});}
  await page.close();
- const phone=await browser.newPage({...devices['Pixel 7']});phone.on('pageerror',e=>errors.push(String(e)));await phone.goto(base+'?t=4');await phone.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
+ const phone=await browser.newPage({...devices['Pixel 7']});phone.on('pageerror',e=>errors.push(String(e)));await phone.goto(base+'?t=4&geology=study');await phone.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
  const cdp=await phone.context().newCDPSession(phone);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:60,y:400,id:1},{x:350,y:400,id:2}]});
  for(let i=0;i<10;i++){await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:60+i*10,y:400,id:1},{x:350-i*10,y:400,id:2}]});await phone.waitForTimeout(30);}await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await phone.waitForTimeout(1000);
  const pinch=await phone.evaluate(()=>waterLab.planetState());assert.ok(pinch.altitude>100);const state=await phone.evaluate(()=>waterLab.inspect());assert.equal(state.forceEnergy,0,'Two-finger zoom must not disturb the water');

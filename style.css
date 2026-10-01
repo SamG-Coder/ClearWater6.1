@@ -17,3 +17,5 @@
 #flightStatus{position:fixed;bottom:52px;left:50%;transform:translateX(-50%);max-width:calc(100% - 32px);padding:10px 16px;border-radius:8px;background:#12343ddd;color:#e7f5f0;font-size:12px;text-align:center;pointer-events:none}#water:focus{outline:none}
 
 aside{max-height:calc(100dvh - 150px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:#719f9770 transparent}#findRain{width:100%;margin-top:4px}
+
+#geologyPanel{border-top:1px solid #d4ebe62b;padding-top:10px;margin:12px 0}#geologyPanel summary{cursor:pointer;font-size:12px}#geologyStatus{display:block;font-size:10px;opacity:.75;margin:6px 0 12px}#worldSeed{box-sizing:border-box;width:100%;padding:8px;color:#dcedea;background:#12343d80;border:1px solid #d4ebe62b;border-radius:5px}

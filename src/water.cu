@@ -60,15 +60,19 @@ __global__ void seed_modes(float4 *seed,float2 *twiddles,float wind){
 // Hermitian time spectrum: h0(k)e^iwt + conjugate(h0(-k))e^-iwt.
 // Bit-reversal on both axes prepares the in-place-order radix-2 inverse FFT.
 // Frequencies and force envelopes depend on depth, not animation time.
-__global__ void prepare_modes(float *motion,float depth){
+__global__ void prepare_modes(float *motion,const float4 *camera,float depth,float time){
+ float waterDepth=depth;
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
  if(x>=128||z>=128||c>=3)return;
+ if(camera[21].w!=0){if(camera[23].y==0)return;waterDepth=camera[21].x;}
  int fx=x<64?x:x-128,fz=z<64?z:z-128;
  float kx=6.2831853f*(float)fx/24,kz=6.2831853f*(float)fz/24,kk=kx*kx+kz*kz;
  float k=c==2?sqrtf(kk):6.2831853f*sqrtf((float)(fx*fx+fz*fz))/patch(c);
- float e=expf(-2*fminf(20,k*depth)),tanhd=(1-e)/(1+e);
+ float e=expf(-2*fminf(20,k*waterDepth)),tanhd=(1-e)/(1+e);
  float omega=c==2?sqrtf(9.81f*k*(1-e)/(1+e)):sqrtf(9.81f*k*tanhd);
- int idx=z*128+x;motion[c*16384+idx]=omega;
+ int idx=z*128+x;
+ if(c<2){float old=motion[c*16384+idx];motion[81920+c*16384+idx]=camera[21].w!=0&&old>0?motion[81920+c*16384+idx]+(old-omega)*time:0;}
+ motion[c*16384+idx]=omega;
  if(c==2){motion[49152+idx]=expf(-kk*.24f*.24f*.5f);motion[65536+idx]=.32f+.009f*kk;}
 }
 __global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturbance,const float *motion,const float4 *camera,float *seaMemory,float time,float energy){
@@ -89,7 +93,7 @@ __global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturb
   float next=mixf(old,target,response);seaMemory[c*16384+z*128+x]=next;amplitude=sqrtf(next);
  }else seaMemory[c*16384+z*128+x]=1;
  float waveEnergy=energy*amplitude;
- float phase=motion[c*16384+z*128+x]*time;
+ float phase=motion[c*16384+z*128+x]*time+motion[81920+c*16384+z*128+x];
  float2 p=make_float2(cosf(phase),sinf(phase));
  float2 u=cmul(a,p),v=cmul(make_float2(b.x,-b.y),make_float2(p.x,-p.y));
  output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2((u.x+v.x)*waveEnergy,(u.y+v.y)*waveEnergy);
@@ -239,16 +243,19 @@ __global__ void domain_probe(const float4 *surface,const float4 *coefficients,co
 // separate animated noise field. Long-wave orbital forcing and local pressure
 // redistribute the ripple phase; short waves are attenuated at the bed.
 // State is retained when paused or when the water becomes deep.
-__global__ void sand_transport(const float4 *brush,const float4 *surface,float4 *sandState,float dt,float depth,int pressureActive){
+__global__ void sand_transport(const float4 *brush,const float4 *surface,const float4 *camera,float4 *sandState,float dt,float depth,int pressureActive,int useGlobeDepth){
+ float waterDepth=depth;
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
  if(x>=128||z>=128)return;
  int i=z*128+x;float4 old=sandState[i];
- float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);
+ if(useGlobeDepth!=0&&camera[21].w!=0&&camera[21].x>=3)return;
+ if(useGlobeDepth!=0&&camera[21].w!=0)waterDepth=camera[21].x;
+ float shallow=clamp01((3-waterDepth)/2);shallow=shallow*shallow*(3-2*shallow);
  float4 w=surface[16384+i];
- float shortBed=expf(-6.2831853f*depth/6);
+ float shortBed=expf(-6.2831853f*waterDepth/6);
  float4 a=region_wave(surface,(float)x*.75f,(float)z*.75f,0,1);
  float4 d=pressureActive!=0?local_pressure(surface,brush,(float)x*.75f,(float)z*.75f,0,1):make_float4(0,0,0,0);
- float forcing=5*(w.x+shortBed*a.x+d.x*expf(-depth*.8f));
+ float forcing=5*(w.x+shortBed*a.x+d.x*expf(-waterDepth*.8f));
  float rate=shallow*(forcing+8*(w.y*fabsf(w.y)+w.z*fabsf(w.z)));
  float step=fminf(.05f,fmaxf(0,dt));
  // Smooth saturation keeps the bed bounded without a hard phase clipping edge.
@@ -563,6 +570,8 @@ __global__ void caustic_clear(unsigned *photons,int dispersion,int lightSize){
  int id=(z*lightSize+x)*4;photons[id]=0;photons[id+1]=0;photons[id+2]=0;photons[id+3]=0;
 }
 __global__ void caustic_map(const float4 *surface,const float4 *camera,unsigned *photons,float depth,int rays,int dispersion,int lightSize){
+ float waterDepth=depth;
+ if(camera[21].w!=0)waterDepth=camera[21].x;
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
  if(x>=rays||z>=rays)return;
  float wx=((float)x+.5f)*6/(float)rays,wz=((float)z+.5f)*6/(float)rays;
@@ -571,7 +580,7 @@ __global__ void caustic_map(const float4 *surface,const float4 *camera,unsigned 
  int channels=dispersion!=0?3:1;
  for(int c=0;c<channels;c++){
   float eta=dispersion==0?.7502f:(c==0?.7524f:(c==1?.7502f:.7480f));
-  float3 d=refractv(incident,n,eta);float distance=(-depth-w.x)/d.y;
+  float3 d=refractv(incident,n,eta);float distance=(-waterDepth-w.x)/d.y;
   float2 hit=make_float2(wx+d.x*distance,wz+d.z*distance);
   float u=hit.x*(float)lightSize/6-.5f,v=hit.y*(float)lightSize/6-.5f;
   int ix=(int)floorf(u),iz=(int)floorf(v);float fu=fract(u),fv=fract(v);
@@ -650,6 +659,104 @@ __device__ float globe_noise(float3 p){
   unsigned h=(unsigned)((int)(ix+(float)i)*92837111+(int)(iy+(float)j)*689287499+(int)(iz+(float)k)*283923481);
   value+=randf(h)*(i==0?1-x:x)*(j==0?1-y:y)*(k==0?1-z:z);
  }return value;
+}
+
+
+// Seeded spherical plates. These are synthetic geography and kinematic
+// landform proxies, not Earth's measured plates or a mantle/erosion solver.
+// Best-candidate sites make irregular cells without a latitude-row lattice.
+__device__ float3 random_sphere(unsigned id){
+ float y=randf(id)*2-1,angle=randf(id+1u)*6.2831853f,r=sqrtf(fmaxf(0,1-y*y));
+ return vec(sinf(angle)*r,y,cosf(angle)*r);
+}
+__global__ void geology_seed(float4 *plates,float4 *camera,int seedValue,int mapWidth,int offset){
+ for(int i=0;i<28;i++){
+  float best=-1;float3 chosen=vec(0,0,1);
+  for(int candidate=0;candidate<16;candidate++){
+   float3 n=random_sphere((unsigned)seedValue*49157u+(unsigned)(i*71+candidate*2));float separation=4;
+   for(int j=0;j<i;j++){float4 q=plates[j*2];separation=fminf(separation,2-2*dotv(n,vec(q.x,q.y,q.z)));}
+   if(separation>best){best=separation;chosen=n;}
+  }
+  unsigned h=(unsigned)seedValue*179u+(unsigned)i*8317u;
+  float crust=randf(h)>.61f?1.0f:.0f;
+  float3 spin=scale(random_sphere(h+21u),1.4f+randf(h+25u)*6.2f);
+  plates[i*2]=make_float4(chosen.x,chosen.y,chosen.z,crust);
+  plates[i*2+1]=make_float4(spin.x,spin.y,spin.z,30+randf(h+29u)*110);
+ }
+ camera[22]=make_float4((float)offset,(float)mapWidth,(float)seedValue,28);
+ camera[23]=make_float4(-1,0,0,0);
+}
+__device__ float4 geology_cell(const float4 *plates,float3 n,int seedValue,int tectonics){
+ float best=-2;int owner=0;
+ for(int i=0;i<28;i++){float4 p=plates[i*2];float d=dotv(n,vec(p.x,p.y,p.z));if(d>best){best=d;owner=i;}}
+ float4 site=plates[owner*2],rotation=plates[owner*2+1];float3 centre=vec(site.x,site.y,site.z);
+ float3 velocity=crossv(vec(rotation.x,rotation.y,rotation.z),n);
+ float total=0,crust=0,age=180,ridge=0,trench=0,uplift=0,boundary=0;
+ for(int i=0;i<28;i++){
+  float4 p=plates[i*2],w=plates[i*2+1];float3 other=vec(p.x,p.y,p.z);
+  float weight=expf((dotv(n,other)-best)*24);total+=weight;crust+=p.w*weight;
+  if(i==owner)continue;
+  float3 delta=minus(other,centre);float inv=rsqrtf(dotv(delta,delta));
+  // Signed relative motion normal to the bisector: positive opens a ridge.
+  float3 toward=scale(delta,inv),relative=minus(crossv(vec(w.x,w.y,w.z),n),velocity);
+  float opening=dotv(relative,toward),km=fmaxf(0,(best-dotv(n,other))*inv)*6371;
+  float separating=fmaxf(0,opening),closing=fmaxf(0,-opening);
+  if(separating>.3f)age=fminf(age,km/fmaxf(3,separating*5));
+  float near=expf(-km*km/(160*160));ridge+=near*clamp01(separating/4);
+  float collision=expf(-km*km/(230*230))*clamp01(closing/4);
+  trench+=collision*(1-site.w)*(1-p.w*.5f);uplift+=collision*(site.w+p.w)*.5f;
+  boundary+=near*opening;
+ }
+ crust/=total;
+ float3 shift=vec(randf((unsigned)seedValue+43u)*11,randf((unsigned)seedValue+47u)*11,randf((unsigned)seedValue+53u)*11);
+ float broad=globe_noise(plus(scale(n,3.7f),shift)),medium=globe_noise(plus(scale(n,11.3f),shift));
+ float continental=clamp01(crust*.57f+broad*.43f+(medium-.5f)*.12f);
+ float relief=globe_noise(plus(scale(n,49),shift))-.5f;
+ float ocean=-2600-320*sqrtf(fminf(180,age));
+ if(tectonics!=0)ocean+=ridge*650-trench*4200;
+ ocean+=relief*330;
+ float shelf=eased(.35f,.57f,continental),interior=eased(.57f,.82f,continental);
+ float h=mixf(ocean,-130,shelf)+interior*2100;
+ if(tectonics!=0)h+=uplift*3600*eased(.36f,.62f,continental);
+ h+=relief*interior*950;
+ return make_float4(fmaxf(-11000,fminf(6500,h)),continental,boundary,(float)owner);
+}
+__global__ void geology_map(const float4 *plates,float4 *camera,int mapWidth,int offset,int seedValue){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
+ if(x>=mapWidth||y>=mapWidth/2)return;
+ float lon=(((float)x+.5f)/(float)mapWidth-.5f)*6.2831853f,lat=(.5f-((float)y+.5f)/(float)(mapWidth/2))*3.14159265f;
+ float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
+ camera[offset+y*mapWidth+x]=geology_cell(plates,n,seedValue,1);
+}
+__device__ float4 geology_sample(const float4 *camera,float3 n){
+ int offset=(int)camera[22].x,width=(int)camera[22].y,height=width/2;
+ float u=(atan2f(n.x,n.z)/6.2831853f+.5f)*(float)width-.5f;
+ float v=(.5f-atan2f(n.y,sqrtf(n.x*n.x+n.z*n.z))/3.14159265f)*(float)height-.5f;
+ int x=(int)floorf(u),y=(int)floorf(v);float a=fract(u),b=fract(v);float4 out=make_float4(0,0,0,0);
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){
+  int yy=y+j,xx=x+i;if(yy<0){yy=-yy-1;xx+=width/2;}if(yy>=height){yy=2*height-yy-1;xx+=width/2;}
+  float4 q=camera[offset+yy*width+(xx&(width-1))];float weight=(i==0?1-a:a)*(j==0?1-b:b);
+  out.x+=q.x*weight;out.y+=q.y*weight;out.z+=q.z*weight;out.w+=q.w*weight;
+ }return out;
+}
+// The first bathymetry stage keeps continental crust submerged. The same
+// signed elevation field supplies raised land in the following stage.
+__global__ void geology_update(float4 *camera,float depth,int enabled){
+ float3 n=vec(camera[6].x,camera[6].y,camera[6].z);float4 g=geology_sample(camera,n);
+ float actual=enabled!=0?fmaxf(1.4f,-g.x):depth;
+ float previous=camera[23].x;
+ camera[21]=make_float4(actual,g.x,g.y,(float)enabled);
+ camera[23]=make_float4(actual,fabsf(actual-previous)>.001f?1.0f:0.0f,g.z,g.w);
+ camera[2].w=actual/.86f;camera[3].w=expf(-actual*.055f);
+}
+__global__ void geology_probe(const float4 *points,const float4 *plates,const float4 *camera,float4 *output,int count,int seedValue){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z));
+ output[i*3]=geology_cell(plates,n,seedValue,1);output[i*3+1]=geology_sample(camera,n);output[i*3+2]=geology_cell(plates,n,seedValue,0);
+}
+__device__ float3 geology_color(float4 g,int mode){
+ if(mode==4){unsigned id=(unsigned)((int)(g.w+.5f));float edge=clamp01(fabsf(g.z)/5);return blend(vec(.18f+randf(id*17u)*.5f,.18f+randf(id*17u+1u)*.5f,.18f+randf(id*17u+2u)*.5f),g.z>0?vec(.90f,.30f,.10f):vec(.15f,.65f,.85f),edge*.65f);}
+ float d=fmaxf(1.4f,-g.x);float3 c=blend(vec(.02f,.12f,.30f),vec(.004f,.008f,.035f),eased(2000,10000,d));
+ c=blend(c,vec(.025f,.42f,.44f),1-eased(80,2500,d));return blend(c,vec(.61f,.80f,.61f),expf(-d/24));
 }
 
 // Global weather is a deterministic, driven circulation approximation, not a
@@ -795,6 +902,37 @@ __global__ void weather_visit(float4 *camera,float2 *navigationState,float latit
  navigationState[6]=make_float2(0,0);navigationState[7]=make_float2(4,0);
  camera[0]=make_float4(0,altitude,4,0);camera[1]=make_float4(0,-.23f,0,0);camera[5].w=-1000;camera[19].w=0;
 }
+
+// Locate a daylight coast or deep basin in the generated field. Interpolating
+// a sea-level crossing gives a shallow spawn instead of an arbitrary deep cell.
+__global__ void geology_visit(float4 *camera,float2 *navigationState,float targetDepth,float clock,float season){
+ int width=(int)camera[22].y,height=width/2,offset=(int)camera[22].x;
+ float best=-100000000,bx=.5f*(float)width,by=.5f*(float)height;float3 sun=globe_sun(clock,season);
+ for(int y=2;y<height-2;y+=2)for(int x=0;x<width;x+=2){
+  float h=camera[offset+y*width+x].x,h2=camera[offset+y*width+((x+2)&(width-1))].x;
+  float fraction=0;int crossing=(h+targetDepth)*(h2+targetDepth)<0?1:0;
+  if(crossing!=0)fraction=clamp01((-targetDepth-h)/(h2-h))*2;
+  if(targetDepth<20&&crossing==0)continue;
+  float lon=(((float)x+.5f+fraction)/(float)width-.5f)*6.2831853f,lat=(.5f-((float)y+.5f)/(float)height)*3.14159265f;
+  float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
+  float score=dotv(n,sun)*20-fabsf(h+targetDepth)*(crossing!=0?0:.001f)-fabsf(n.y)*2;
+  if(score>best){best=score;bx=(float)x+.5f+fraction;by=(float)y+.5f;}
+ }
+ float lon=(bx/(float)width-.5f)*6.2831853f,lat=(.5f-by/(float)height)*3.14159265f;
+ float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
+ // Correct the two-cell coarse bracket against the actual bilinear sampler.
+ if(targetDepth<20){
+  float lo=lon-6.2831853f*2/(float)width,hi=lon+6.2831853f*2/(float)width;
+  float sign=geology_sample(camera,vec(sinf(lo)*cosf(lat),sinf(lat),cosf(lo)*cosf(lat))).x+targetDepth;
+  for(int j=0;j<18;j++){float mid=(lo+hi)*.5f;float h=geology_sample(camera,vec(sinf(mid)*cosf(lat),sinf(lat),cosf(mid)*cosf(lat))).x+targetDepth;if(h*sign>0)lo=mid;else hi=mid;}
+  lon=(lo+hi)*.5f;n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
+ }
+ float3 east=vec(cosf(lon),0,-sinf(lon));
+ navigationState[0]=make_float2(n.x,0);navigationState[1]=make_float2(n.y,0);navigationState[2]=make_float2(n.z,0);
+ navigationState[3]=make_float2(east.x,0);navigationState[4]=make_float2(east.y,0);navigationState[5]=make_float2(east.z,0);
+ navigationState[6]=make_float2(0,0);navigationState[7]=make_float2(4,0);
+ camera[0]=make_float4(0,targetDepth<20?2.6f:8,4,0);camera[1]=make_float4(0,-.32f,0,0);camera[5].w=-1000;camera[19].w=0;
+}
 // Two curved cloud decks share the exact density used by near-water shadows.
 // Bounded shell integration avoids a full-screen volumetric march on phones.
 __device__ float4 globe_clouds(float3 ray,const float4 *camera,float ground){
@@ -911,6 +1049,7 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int 
   float day=clamp01(dotv(localNormal,sun)),limb=1-clamp01(-dotv(localNormal,ray));
   float basin=globe_noise(scale(normal,7));
   float3 ocean=blend(vec(.002f,.010f,.037f),vec(.004f,.030f,.050f),basin);
+  if(camera[21].w!=0){float4 geology=geology_sample(camera,normal);float d=fmaxf(1.4f,-geology.x);ocean=blend(ocean,vec(.11f,.30f,.25f),expf(-d*.032f));}
   float3 shadingNormal=localNormal;float wind=7;
   if(camera[13].w!=0){
    float4 flow=weather_map_sample(camera,normal,1);wind=sqrtf(flow.x*flow.x+flow.y*flow.y+flow.z*flow.z);
@@ -1002,6 +1141,7 @@ __device__ float3 surface_weather(float3 col,float3 ray,const float4 *camera,flo
  return plus(col,scale(vec(.45f,.55f,.62f),streak*daylight*.4f));
 }
 __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
+ if(camera[21].w!=0)depth=camera[21].x;
  int smooth=lightSize>256?1:0;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -1010,6 +1150,7 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float4 solar=camera[9];float3 localSun=vec(solar.x,solar.y,solar.z);
  float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
  float vignette=1-.10f*(sx*sx+sy*sy);
+ if(view>=3&&globeT>0){float3 normal=to_world(camera,unit(vec(ray.x*globeT,earth_radius()+pos.y+ray.y*globeT,ray.z*globeT)));return geology_color(geology_sample(camera,normal),view);}
  if(globeT<0||planetMix>=1){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
  if(globeT>0){
  float t=globeT;float4 w=make_float4(0,0,0,0);
@@ -1042,6 +1183,7 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  return col;
 }
 __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
+ if(camera[21].w!=0)depth=camera[21].x;
  int smooth=lightSize>256?1:0;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -1050,6 +1192,7 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float4 solar=camera[9];float3 localSun=vec(solar.x,solar.y,solar.z);
  float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
  float vignette=1-.10f*(sx*sx+sy*sy);
+ if(view>=3&&globeT>0){float3 normal=to_world(camera,unit(vec(ray.x*globeT,earth_radius()+pos.y+ray.y*globeT,ray.z*globeT)));return geology_color(geology_sample(camera,normal),view);}
  if(globeT<0||planetMix>=1){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
  if(globeT>0){
  float t=globeT;float4 w=make_float4(0,0,0,0);

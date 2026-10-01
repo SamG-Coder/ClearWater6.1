@@ -9,6 +9,7 @@ const mapSize=()=>pcQuality()?512:256;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
 let visitRain=false;
+let plates,geologySeed=-1,geologySize=0;const geologyOffset=131104+(touchDevice?1048576:4194304);
 let seaMemory,weatherClock=14*3600,weatherSeason=172,weatherDirty=true,weatherRefresh=0,weatherMapAt=-Infinity,weatherSkyAt=-Infinity,lastWeatherMode=-1,weatherSize=0,zoomTail=false;
 let navigation,zoomDelta=0,sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let flyFallback=false,lockPending=false;
@@ -19,9 +20,12 @@ if(new URLSearchParams(location.search).get('weather')==='study')$('weatherMode'
 for(const id of ['weatherMode','weatherRate'])$(id).onchange=()=>{weatherDirty=true;};
 $('dayTime').oninput=()=>{weatherClock=Math.floor(weatherClock/86400)*86400+Number($('dayTime').value)*3600;weatherDirty=true;weatherRefresh=1;};
 $('season').onchange=()=>{weatherSeason=Number($('season').value);weatherDirty=true;weatherRefresh=1;};
+if(new URLSearchParams(location.search).get('geology')==='study')$('depthMode').value='0';
+$('depthMode').onchange=()=>{lastDepth=-1;weatherDirty=true;};
+$('worldSeed').onchange=()=>{weatherDirty=true;};
 function fail(e){failed=true;diagnostics.errors.push(String(e.message||e));$('error').hidden=false;$('error').textContent=diagnostics.errors.at(-1);$('loading').hidden=true;console.error(e);}
 function labels(){for(const id of ['depth','energy','wind','exposure'])$(id+'Value').textContent=Number($(id).value).toFixed(2)+(id==='depth'?' m':id==='wind'?' m/s':'');}labels();
-for(const id of ['depth','energy','wind','exposure'])$(id).oninput=labels;
+for(const id of ['depth','energy','wind','exposure'])$(id).oninput=()=>{if(id==='depth'){$('depthMode').value='0';lastDepth=-1;weatherDirty=true;}labels();};
 $('toggle').onclick=()=>{resetSticks();keys.clear();padPointers.clear();document.body.classList.toggle('clean');$('toggle').textContent=touchDevice?(document.body.classList.contains('clean')?'Settings':'Close settings'):(document.body.classList.contains('clean')?'Show controls ↙':'Hide controls ↗');};
 $('pause').onclick=()=>{playing=!playing;$('pause').textContent=playing?'Pause':'Resume';};$('reset').onclick=()=>reset=1;
 $('findRain').onclick=()=>{visitRain=true;reset=0;weatherDirty=true;weatherRefresh=1;};
@@ -125,6 +129,13 @@ function resize(){
 function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars);}
 function compute(dt,timestampWrites){
  const b=runtime.batch({timestampWrites});
+ const geoWidth=touchDevice?512:1024,geoSeed=Math.max(1,Math.min(999999,Math.floor(Number($('worldSeed').value)||1))),geoEnabled=Number($('depthMode').value);
+ if(geoSeed!==geologySeed||geoWidth!==geologySize){
+  b.dispatch(bind('geology_seed',{plates,camera},{seedValue:geoSeed,mapWidth:geoWidth,offset:geologyOffset}),[1,1,1]);
+  b.dispatch(bind('geology_map',{plates,camera},{mapWidth:geoWidth,offset:geologyOffset,seedValue:geoSeed}),[geoWidth/8,geoWidth/16,1]);
+  geologySeed=geoSeed;geologySize=geoWidth;weatherDirty=true;diagnostics.geologyBuilds=(diagnostics.geologyBuilds||0)+1;
+ }
+ diagnostics.geologyEnabled=geoEnabled!==0;diagnostics.geologyMapSize=geoWidth;diagnostics.worldSeed=geoSeed;
  const weatherEnabled=Number($('weatherMode').value),mapResolution=mobileProfile()?128:256,skyWidth=mobileProfile()?256:512,weatherDt=playing?dt*Number($('weatherRate').value):0;
  weatherClock+=weatherDt;
  const moving=reset!==0||lookX!==0||lookY!==0||zoomDelta!==0||zoomTail||keys.size>0||sticks.move.x!==0||sticks.move.y!==0;
@@ -139,7 +150,9 @@ function compute(dt,timestampWrites){
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
  if(visitRain){b.dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude:0,longitude:0,altitude:5,findRain:1,mapSize:mapResolution}),[1,1,1]);visitRain=false;weatherDirty=true;}
+ if(geoEnabled&&(reset===1||reset===2)){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:reset===1?1.4:4500,clock:weatherClock,season:weatherSeason}),[1,1,1]);reset=0;weatherDirty=true;}
  b.dispatch(bind('camera_step',{camera,navigationState:navigation},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),zoom:zoomDelta,reset,depth}),[1,1,1]);zoomDelta=0;reset=0;lookX=lookY=0;
+ b.dispatch(bind('geology_update',{camera},{depth,enabled:geoEnabled}),[1,1,1]);
  b.dispatch(bind('weather_update',{camera},{clock:weatherClock,season:weatherSeason,time,dt:weatherDt,baseWind:wind,enabled:weatherEnabled,mapSize:mapResolution,skyWidth,refresh:weatherRefresh}),[1,1,1]);
  if(weatherEnabled&&(weatherDirty||moving||time-weatherSkyAt>=.1||time<weatherSkyAt)){
   b.dispatch(bind('weather_sky',{camera},{skyWidth}),[skyWidth/8,skyWidth/32,1]);
@@ -148,13 +161,13 @@ function compute(dt,timestampWrites){
  }
  weatherDirty=false;weatherRefresh=0;lastWeatherMode=weatherEnabled;weatherSize=mapResolution;diagnostics.weatherClock=weatherClock;diagnostics.weatherEnabled=weatherEnabled===1;
  b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
- if(depth!==lastDepth){b.dispatch(bind('prepare_modes',{motion},{depth}),[16,16,3]);lastDepth=depth;diagnostics.dispersionSeeds=(diagnostics.dispersionSeeds||0)+1;}
+ if(geoEnabled||depth!==lastDepth){b.dispatch(bind('prepare_modes',{motion,camera},{depth,time}),[16,16,3]);lastDepth=depth;diagnostics.dispersionSeeds=(diagnostics.dispersionSeeds||0)+1;}
  if(disturbanceActive)b.dispatch(bind('force_modes',{disturbance,brush,motion},{dt:playing?dt:0,clear:0}),[16,16,1]);
  if(wind!==lastWind){b.dispatch(bind('seed_modes',{seed,twiddles},{wind}),[16,16,3]);lastWind=wind;diagnostics.spectrumSeeds=(diagnostics.spectrumSeeds||0)+1;}
  b.dispatch(bind('spectrum',{output:fft[0],seed,disturbance,motion,camera,seaMemory},{time,energy}),[16,16,cascades]);
  for(let axis=0;axis<2;axis++)b.dispatch(bind('fft_local',{input:fft[axis],output:fft[1-axis],twiddles},{axis}),[128,1,cascades]);
  b.dispatch(bind('resolve',{input:fft[0],surface}),[16,16,cascades]);
- if(pcQuality()&&depth<3&&playing&&dt>0)b.dispatch(bind('sand_transport',{brush,surface,sandState},{dt,depth,pressureActive:disturbanceActive?1:0}),[16,16,1]);
+ if(pcQuality()&&(geoEnabled||depth<3)&&playing&&dt>0)b.dispatch(bind('sand_transport',{brush,surface,camera,sandState},{dt,depth,pressureActive:disturbanceActive?1:0,useGlobeDepth:1}),[16,16,1]);
  if(pcQuality())for(let axis=0;axis<2;axis++)b.dispatch(bind('surface_coefficients',{input:axis===0?surface:coefficients[0],output:coefficients[axis]},{axis}),[16,16,cascades]);
  b.dispatch(bind('caustic_clear',{photons},{dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
  b.dispatch(bind('caustic_map',{surface:pcQuality()?coefficients[1]:surface,photons,camera},{depth,rays,dispersion,lightSize}),[rays/8,rays/8,1]);
@@ -175,7 +188,7 @@ async function frame(now){
    diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;diagnostics.ready=true;diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
    frameAverage=frameAverage?frameAverage*.94+diagnostics.frameMs*.06:diagnostics.frameMs;
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
-   if(diagnostics.frames%15===0&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,160,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];zoomTail=Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
+   if(diagnostics.frames%15===0&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];zoomTail=Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[52])} deep · plate ${Math.floor(v[63]+1)} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
    if(diagnostics.frames===1||diagnostics.frames%15===0)updateMetrics();
   }
   requestAnimationFrame(frame);
@@ -183,6 +196,10 @@ async function frame(now){
 }
 async function exclusive(fn){busy=true;try{await runtime.idle();return await fn();}finally{busy=false;}}
 window.waterLab={
+ async waveModes(){return exclusive(async()=>{const m=await runtime.read(motion);return [1,129,16385,16513].map(i=>{const j=i%16384,x=j%128,z=Math.floor(j/128),k=2*Math.PI*Math.hypot(x,z)/(i<16384?6:96);return {i,k,omega:m[i],phase:m[i]*time+m[81920+i]};});});},
+ async geologyState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,64,336);return {depth:c[0],elevation:c[1],crust:c[2],enabled:!!c[3],offset:c[4],mapWidth:c[5],seed:c[6],plateCount:c[7],boundary:c[10],plate:c[11],finite:c.every(Number.isFinite),builds:diagnostics.geologyBuilds};});},
+ async geologyAt(points){return exclusive(async()=>{const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*48);try{runtime.batch().dispatch(bind('geology_probe',{points:input,plates,camera,output:out},{count:points.length,seedValue:geologySeed}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.geology_probe.clear();}});},
+ async plateData(){return exclusive(async()=>Array.from(await runtime.read(plates)));},
  async weatherLocation(latitude,longitude,altitude=5){return exclusive(async()=>{runtime.batch().dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude,longitude,altitude,findRain:0,mapSize:weatherSize}),[1,1,1]).submit();weatherDirty=true;weatherRefresh=1;compute(0);await runtime.idle();});},
  async weatherState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,320),memory=await runtime.read(seaMemory);let fast=0,slow=0;for(let i=0;i<16384;i++){fast+=memory[i]/16384;slow+=memory[i+16384]/16384;}return {clock:weatherClock,season:weatherSeason,enabled:!!c[55],wind:Array.from(c.slice(40,43)),cloud:c[43],rain:c[44],sunlight:c[45],temperature:c[46],pressure:c[47],sun:Array.from(c.slice(48,51)),localSun:Array.from(c.slice(36,39)),latitude:c[70],localHour:c[71],energy:[fast,slow],finite:c.every(Number.isFinite)&&memory.every(Number.isFinite),mapUpdates:diagnostics.weatherMapUpdates,skyUpdates:diagnostics.weatherSkyUpdates};});},
  async weatherAt(points){return exclusive(async()=>{const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*64);try{runtime.batch().dispatch(bind('weather_probe',{points:input,output:out,camera},{count:points.length,season:weatherSeason}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.weather_probe.clear();}});},
@@ -215,7 +232,7 @@ window.waterLab={
   const zero=runtime.createBuffer(49152*16),states=[0,1,2,3].map(()=>runtime.createBuffer(16384*16));
   try{
    for(let group=0;group<4;group++){const batch=runtime.batch();
-   for(let step=0;step<30;step++)for(let j=0;j<4;j++)batch.dispatch(bind('sand_transport',{brush,surface:j===0?zero:surface,sandState:states[j]},{dt:j===3?0:1/30,depth:j===2?8:.5,pressureActive:disturbanceActive?1:0}),[16,16,1]);
+   for(let step=0;step<30;step++)for(let j=0;j<4;j++)batch.dispatch(bind('sand_transport',{brush,surface:j===0?zero:surface,camera,sandState:states[j]},{dt:j===3?0:1/30,depth:j===2?8:.5,pressureActive:disturbanceActive?1:0,useGlobeDepth:0}),[16,16,1]);
    batch.submit();}const results=[];
    for(const state of states){const v=await runtime.read(state);let max=0,rms=0;for(let i=0;i<v.length;i+=4){max=Math.max(max,Math.abs(v[i]));rms+=v[i]*v[i];}results.push({finite:Array.from(v).every(Number.isFinite),max,rms:Math.sqrt(rms/16384)});}
    return {flat:results[0],shallow:results[1],deep:results[2],paused:results[3]};
@@ -263,11 +280,11 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }
- motion=runtime.createBuffer(81920*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((131104+(touchDevice?1048576:4194304))*16);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
+ motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((geologyOffset+(touchDevice?512*256:1024*512))*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
 }catch(e){fail(e);}

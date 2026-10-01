@@ -7,7 +7,7 @@ try{
  const page=await browser.newPage({...devices['Pixel 7']}),errors=[];
  await page.addInitScript(()=>{const submit=GPUQueue.prototype.submit;window.testQueueSubmissions=0;GPUQueue.prototype.submit=function(...args){window.testQueueSubmissions++;return submit.apply(this,args);};});
  page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
- await page.goto(process.env.WATER_URL||'http://127.0.0.1:5191/');
+ await page.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?geology=study');
  await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
  await page.waitForFunction(()=>waterDiagnostics.frames>=3||waterDiagnostics.errors.length);
  const initial=await page.evaluate(()=>waterDiagnostics);
@@ -43,7 +43,7 @@ try{
  await page.locator('#depth').evaluate(e=>{e.value='2';e.dispatchEvent(new Event('input'));});await page.waitForFunction(()=>waterDiagnostics.dispersionSeeds===2);
  await page.locator('#depth').evaluate(e=>{e.value='1.4';e.dispatchEvent(new Event('input'));});await page.waitForFunction(()=>waterDiagnostics.dispersionSeeds===3);
  await page.screenshot({path:'captures/mobile-settings.png'});await page.locator('#toggle').tap();
- const benchPage=await browser.newPage({...devices['Pixel 7']});await benchPage.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?t=4');await benchPage.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});const after=await benchPage.evaluate(()=>waterLab.benchmark());await benchPage.close();
+ const benchPage=await browser.newPage({...devices['Pixel 7']});await benchPage.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?t=4&geology=study');await benchPage.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});const after=await benchPage.evaluate(()=>waterLab.benchmark());await benchPage.close();
  await page.setViewportSize({width:839,height:412});await page.waitForFunction(()=>waterDiagnostics.width>waterDiagnostics.height);
  const landscape=await page.evaluate(()=>waterDiagnostics);assert.ok(Math.max(landscape.width,landscape.height)<=960);await page.screenshot({path:'captures/mobile-landscape.png'});
  const fullCaustics=await page.evaluate(()=>waterLab.flatCausticsTest());const mobileCaustics=await page.evaluate(()=>waterLab.flatCausticsTest(true));assert.ok(fullCaustics.maxDeviationFromUniform<.001&&mobileCaustics.maxDeviationFromUniform<.001);for(const mean of force.causticMean)assert.ok(Math.abs(mean-1)<.01);
@@ -61,7 +61,7 @@ try{
  assert.deepEqual(errors,[]);
  const iphone=await browser.newPage({...devices['iPhone 13']});
  iphone.on('pageerror',e=>errors.push(String(e)));
- await iphone.goto(process.env.WATER_URL||'http://127.0.0.1:5191/');await iphone.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});
+ await iphone.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?geology=study');await iphone.waitForFunction(()=>waterDiagnostics.ready,null,{timeout:120000});
  assert.equal(await iphone.evaluate(()=>waterDiagnostics.mobile),true);
  assert.ok((await iphone.locator('meta[name="viewport"]').getAttribute('content')).includes('viewport-fit=cover'));
  await iphone.locator('#toggle').tap();assert.equal(await iphone.locator('#fly').textContent(),'Push water');

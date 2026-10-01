@@ -9,7 +9,7 @@ const point=(lat,lon,time=50400)=>{lat*=Math.PI/180;lon*=Math.PI/180;return [Mat
 const change=(a,b)=>a.reduce((sum,v,i)=>sum+Math.abs(v-b[i]),0)/a.length;
 try{
  const page=await browser.newPage({viewport:{width:1440,height:900}});page.on('pageerror',e=>errors.push(String(e)));
- await page.goto(url+'?t=4');await ready(page);assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
+ await page.goto(url+'?t=4&geology=study');await ready(page);assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
  const initial=await page.evaluate(()=>waterLab.weatherState());assert.ok(initial.finite&&initial.enabled);assert.ok(Math.abs(initial.localHour-14)<.001);
  await page.locator('#toggle').click();await page.screenshot({path:'captures/weather-surface.png'});
  // Independently check the solar period and tilt at each season.
@@ -77,13 +77,13 @@ try{
  await page.locator('#fly').click();await page.waitForFunction(()=>document.pointerLockElement===document.querySelector('canvas')&&waterDiagnostics.pointerLock==='locked');
  assert.match(await page.locator('#fly').textContent(),/Flying/);const flight=await page.evaluate(()=>waterLab.planetState());await page.mouse.wheel(0,-400);await page.waitForTimeout(80);const faster=await page.evaluate(()=>waterLab.planetState());assert.ok(faster.speed>flight.speed*2);await page.keyboard.press('Escape');
  await page.close();
- const phone=await browser.newPage({...devices['Pixel 7']});phone.on('pageerror',e=>errors.push(String(e)));await phone.goto(url+'?t=4');await ready(phone);
+ const phone=await browser.newPage({...devices['Pixel 7']});phone.on('pageerror',e=>errors.push(String(e)));await phone.goto(url+'?t=4&geology=study');await ready(phone);
  const phoneWeather=await phone.evaluate(()=>waterLab.weatherState());assert.ok(phoneWeather.finite&&phoneWeather.enabled);
  const mobileGpu=await phone.evaluate(()=>waterLab.benchmark(50,true));await phone.evaluate(()=>waterLab.pause());await phone.screenshot({path:'captures/weather-phone.png'});await phone.close();
  // A denied browser lock must not cause an unhandled error or stop the render.
  const denied=await browser.newPage({viewport:{width:1440,height:900}});denied.on('pageerror',e=>errors.push(String(e)));
  await denied.addInitScript(()=>{HTMLCanvasElement.prototype.requestPointerLock=()=>Promise.reject(new DOMException('Test: lock denied','NotAllowedError'));});
- await denied.goto(url+'?t=4');await ready(denied);await denied.locator('#fly').click();await denied.waitForFunction(()=>waterDiagnostics.pointerLock==='drag');assert.match(await denied.locator('#flightStatus').textContent(),/blocked/);
+ await denied.goto(url+'?t=4&geology=study');await ready(denied);await denied.locator('#fly').click();await denied.waitForFunction(()=>waterDiagnostics.pointerLock==='drag');assert.match(await denied.locator('#flightStatus').textContent(),/blocked/);
  const pose=await denied.evaluate(()=>waterLab.inspect());await denied.mouse.move(850,400);await denied.mouse.down();await denied.mouse.move(990,460,{steps:8});await denied.mouse.up();await denied.waitForTimeout(100);const looked=await denied.evaluate(()=>waterLab.inspect());assert.notEqual(looked.camera[4],pose.camera[4]);assert.equal(looked.forceEnergy,0);await denied.close();
  const shader=JSON.parse(await readFile('kernels/render_pc.json','utf8')).wgsl;assert.ok(!shader.includes('cw_d_add'));assert.deepEqual(errors,[]);
  const result={environment:'Desktop NVIDIA/Edge with real 1440p/4K framebuffers; Pixel 7 is touch/viewport emulation, not physical phone testing',initial,seasons,seams,circulation,rain,windEnergy:studyEnergy,paused:true,rainyGpu,rainy4k,orbit,mobileGpu,deniedMouseLockFallback:true,errors};await writeFile('captures/weather-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));

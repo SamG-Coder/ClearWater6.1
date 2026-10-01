@@ -36,6 +36,7 @@ jobs:
           node --check scripts/pc-quality-verify.mjs
           node --check scripts/planet-verify.mjs
           node --check scripts/weather-verify.mjs
+          node --check scripts/geology-verify.mjs
       - name: Compile CUDA kernels and build static site
         run: npm run build
       - uses: actions/upload-pages-artifact@v4
