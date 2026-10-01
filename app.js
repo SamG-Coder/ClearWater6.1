@@ -110,12 +110,12 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('spectrum',{output:fft[0],seed,disturbance,motion},{time,energy}),[16,16,cascades]);
  for(let axis=0;axis<2;axis++)b.dispatch(bind('fft_local',{input:fft[axis],output:fft[1-axis],twiddles},{axis}),[128,1,cascades]);
  b.dispatch(bind('resolve',{input:fft[0],surface}),[16,16,cascades]);
- if(pcQuality()&&depth<3&&playing&&dt>0)b.dispatch(bind('sand_transport',{surface,sandState},{dt,depth,pressureActive:disturbanceActive?1:0}),[16,16,1]);
+ if(pcQuality()&&depth<3&&playing&&dt>0)b.dispatch(bind('sand_transport',{brush,surface,sandState},{dt,depth,pressureActive:disturbanceActive?1:0}),[16,16,1]);
  if(pcQuality())for(let axis=0;axis<2;axis++)b.dispatch(bind('surface_coefficients',{input:axis===0?surface:coefficients[0],output:coefficients[axis]},{axis}),[16,16,cascades]);
  b.dispatch(bind('caustic_clear',{photons},{dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
  b.dispatch(bind('caustic_map',{surface:pcQuality()?coefficients[1]:surface,photons},{depth,rays,dispersion,lightSize}),[rays/8,rays/8,1]);
  b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/lightSize)**2,dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
- b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
+ b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{brush,...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
 async function frame(now){
@@ -142,11 +142,22 @@ window.waterLab={
  async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const rawLight=await runtime.read(mobileProfile()?monoLight:light),l=mobileProfile()?Float32Array.from({length:65536*4},(_,i)=>i%4===3?1:rawLight[Math.floor(i/4)]):rawLight,d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];let causticMin=Infinity,causticMax=-Infinity;for(let i=0;i<l.length;i+=4){causticMin=Math.min(causticMin,l[i]);causticMax=Math.max(causticMax,l[i]);for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/(l.length/4);}return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin,causticMax,adapter:runtime.describe()};});},
  async seek(t){return exclusive(async()=>{playing=false;time=t;resize();compute(0);await runtime.idle();});},
  async screenshot(){return exclusive(async()=>{const p=await runtime.read(image,Uint32Array);return {width,height,rgba:Array.from(new Uint8Array(p.buffer))};});},
+ async domainTest(){return exclusive(async()=>{
+  const domain=await runtime.read(brush),cx=domain[8],cz=domain[9],count=532,points=new Float32Array(count*4);
+  for(let i=0;i<256;i++){const x=cx+(i%16-7.5)*.75,z=cz+(Math.floor(i/16)-7.5)*.75;points.set([x,z,0,0],i*4);points.set([x+24,z,0,0],(i+256)*4);}
+  const centers=[[24,3],[3,24],[cx+7,cz],[cx+12,cz]];for(let j=0;j<4;j++)for(const [k,dx,dz] of [[0,0,0],[1,.001,0],[2,-.001,0],[3,0,.001],[4,0,-.001]])points.set([centers[j][0]+dx,centers[j][1]+dz,0,0],(512+j*5+k)*4);
+  const input=runtime.createBuffer(points),output=runtime.createBuffer(count*4*16);
+  try{runtime.batch().dispatch(bind('domain_probe',{surface,coefficients:pcQuality()?coefficients[1]:surface,brush,points:input,output},{count}),[9,1,1]).submit();const values=await runtime.read(output);const local=[0,0],ghost=[0,0];let untaperedGhost=0,regionalDifference=0;
+   for(let i=0;i<256;i++){for(let j=0;j<2;j++){local[j]=Math.max(local[j],Math.abs(values[i*16+j*4]));ghost[j]=Math.max(ghost[j],Math.abs(values[(i+256)*16+j*4]));}untaperedGhost=Math.max(untaperedGhost,Math.abs(values[(i+256)*16+12]));regionalDifference=Math.max(regionalDifference,Math.abs(values[i*16+8]-values[(i+256)*16+8]));}
+   let seamSlopeError=0;for(let j=0;j<4;j++)for(const offset of [4,8]){const i=512+j*5,sx=(values[(i+1)*16+offset]-values[(i+2)*16+offset])/.002,sz=(values[(i+3)*16+offset]-values[(i+4)*16+offset])/.002;seamSlopeError=Math.max(seamSlopeError,Math.abs(sx-values[i*16+offset+1]),Math.abs(sz-values[i*16+offset+2]));}
+   return {seamSlopeError,finite:values.every(Number.isFinite),local,ghost,untaperedGhost,regionalDifference,domain:[cx,cz]};
+  }finally{runtime.destroyBuffer(input);runtime.destroyBuffer(output);kernels.domain_probe.clear();}
+ });},
  async sandTest(){return exclusive(async()=>{
   const zero=runtime.createBuffer(49152*16),states=[0,1,2,3].map(()=>runtime.createBuffer(16384*16));
   try{
    for(let group=0;group<4;group++){const batch=runtime.batch();
-   for(let step=0;step<30;step++)for(let j=0;j<4;j++)batch.dispatch(bind('sand_transport',{surface:j===0?zero:surface,sandState:states[j]},{dt:j===3?0:1/30,depth:j===2?8:.5,pressureActive:disturbanceActive?1:0}),[16,16,1]);
+   for(let step=0;step<30;step++)for(let j=0;j<4;j++)batch.dispatch(bind('sand_transport',{brush,surface:j===0?zero:surface,sandState:states[j]},{dt:j===3?0:1/30,depth:j===2?8:.5,pressureActive:disturbanceActive?1:0}),[16,16,1]);
    batch.submit();}const results=[];
    for(const state of states){const v=await runtime.read(state);let max=0,rms=0;for(let i=0;i<v.length;i+=4){max=Math.max(max,Math.abs(v[i]));rms+=v[i]*v[i];}results.push({finite:Array.from(v).every(Number.isFinite),max,rms:Math.sqrt(rms/16384)});}
    return {flat:results[0],shallow:results[1],deep:results[2],paused:results[3]};
@@ -194,11 +205,11 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }
- motion=runtime.createBuffer(81920*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);camera=runtime.createBuffer(80);brush=runtime.createBuffer(32);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
+ motion=runtime.createBuffer(81920*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);camera=runtime.createBuffer(80);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
 }catch(e){fail(e);}

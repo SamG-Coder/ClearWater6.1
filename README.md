@@ -117,3 +117,12 @@ The optimization verifier also checks that the lightweight render shader matches
 PC quality profiles retain a small 128 by 128 sediment phase field on the GPU (256 KiB). A CUDA transport pass integrates the resolved long-wave FFT, depth-attenuated short waves and interactive pressure waves. Its response fades smoothly with depth and stops at 3 metres. Integration uses elapsed time, pauses with the simulation, and keeps its state between frames. Continuous-curvature sampling warps the sand ridges; the same deformation enters bed intersections and analytic lighting normals. Gravel remains anchored.
 
 This is a visual sediment transport approximation, not a sediment mass conservation or full coastal morphology solver. Mobile and Performance retain their existing shader and do not allocate the sediment field unless a PC quality profile is selected. No extra FFT is required. The PC verifier checks actual FFT forcing against flat-water, deep-water and zero-timestep controls, then compares sand before and after live evolution with water frozen at the same simulation instant.
+
+
+## Local interaction and regional wave variation
+
+Touch/mouse pressure uses a single world-space 24 metre FFT domain. Its full-strength centre extends 7 metres in each direction and a quintic taper reaches zero at the 12 metre boundary, including the taper derivative in surface normals. Coordinates are relative to the interaction origin; neighboring periodic copies are never sampled. When a new brush position moves more than 6 metres from the domain centre, the solver recentres and replaces its previous wake. This keeps one pressure FFT and constant storage; it does not retain unlimited old wakes across the world.
+
+Background short waves use deterministic per-region random phase offsets, blended with continuous first and second derivatives across 24 metre regions. One warped spectral query replaces the old periodic query, without new FFTs. Caustic lookup follows the same phase variation. Mobile and PC both use this variation and local touch behaviour. No external examples or assets are used in this change.
+
+`waterLab.domainTest()` queries real GPU fields: a live local wake remains nonzero, its copy 24 metres away is exactly zero, and an untapered negative control reproduces the old ghost. It also checks regional variation and analytic gradients at region/taper boundaries. Force and mobile interaction tests exercise these checks alongside existing controls. Mobile images intentionally differ from the earlier uniform tiling release.

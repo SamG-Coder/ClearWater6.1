@@ -25,6 +25,7 @@ try{
  await touch('touchEnd');await page.waitForTimeout(100);
  const force=await page.evaluate(()=>waterLab.inspect());assert.ok(force.forceEnergy>1e-7&&force.finite);assert.deepEqual(force.camera,before.camera);
  assert.equal(await page.evaluate(()=>waterDiagnostics.activeCascades),3,'A water drag must activate the complete force FFT');
+ const locality=await page.evaluate(()=>waterLab.domainTest());assert.ok(locality.finite&&locality.local[0]>1e-6);assert.deepEqual(locality.ghost,[0,0]);
  await page.screenshot({path:'captures/mobile-portrait.png'});
  await page.locator('#touchMode').tap();await touch('touchStart',[{x:180,y:380,id:1}]);await touch('touchMove',[{x:240,y:410,id:1}]);await touch('touchEnd');await page.waitForTimeout(150);
  const looked=await page.evaluate(()=>waterLab.inspect());assert.notEqual(looked.camera[4],before.camera[4]);

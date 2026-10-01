@@ -153,8 +153,33 @@ __device__ float4 sample_pc(const float4 *s,float x,float z,int c,int slopes){
  }
  return make_float4(dot4(rows,wz),slopes!=0?dot4(derivatives,wz)*factor:0,slopes!=0?dot4(rows,dz)*factor:0,0);
 }
-__device__ float4 wave_pc(const float4 *s,float x,float z,float fade,int pressureActive,int slopes){
- float4 a=sample_pc(s,x,z,0,slopes),b=sample_pc(s,x,z,1,slopes),d=pressureActive!=0?sample_pc(s,x,z,2,slopes):make_float4(0,0,0,0);
+// World-space seeded phase variation. Quintic blending gives continuous
+// derivatives at region boundaries, without extra spectra or FFT passes.
+__device__ float4 wave_region(float x,float z){
+ float u=x/24,v=z/24,ix=floorf(u),iz=floorf(v);u=fract(u);v=fract(v);
+ float du=30*u*u*(u-1)*(u-1)/24,dv=30*v*v*(v-1)*(v-1)/24;
+ float a=u*u*u*(u*(u*6-15)+10),b=v*v*v*(v*(v*6-15)+10);
+ float p=cell(ix,iz),q=cell(ix+1,iz),r=cell(ix,iz+1),t=cell(ix+1,iz+1);
+ return make_float4((mixf(mixf(p,q,a),mixf(r,t,a),b)-.5f)*6,mixf(q-p,t-r,b)*du*6,mixf(r-p,t-q,a)*dv*6,0);
+}
+__device__ float4 region_wave(const float4 *s,float x,float z,int smooth,int slopes){
+ float4 region=wave_region(x,z);
+ float4 w=smooth!=0?sample_pc(s,x,z+region.x,0,slopes):sample(s,x,z+region.x,0);
+ return make_float4(w.x,w.y+w.z*region.y,w.z*(1+region.z),0);
+}
+// The periodic solver is sampled only inside its one world-space domain.
+// A C2 taper suppresses wraparound and includes its derivative in the normal.
+__device__ float4 local_pressure(const float4 *s,const float4 *brush,float x,float z,int smooth,int slopes){
+ float4 domain=brush[2];x-=domain.x;z-=domain.y;
+ if(domain.w==0||fabsf(x)>=12||fabsf(z)>=12)return make_float4(0,0,0,0);
+ float ux=clamp01((fabsf(x)-7)/5),uz=clamp01((fabsf(z)-7)/5);
+ float ax=1-ux*ux*ux*(ux*(ux*6-15)+10),az=1-uz*uz*uz*(uz*(uz*6-15)+10);
+ float dx=-6*ux*ux*(ux-1)*(ux-1)*(x<0?-1:1),dz=-6*uz*uz*(uz-1)*(uz-1)*(z<0?-1:1);
+ float4 w=smooth!=0?sample_pc(s,x,z,2,slopes):sample(s,x,z,2);
+ return make_float4(w.x*ax*az,(w.y*ax+w.x*dx)*az,(w.z*az+w.x*dz)*ax,0);
+}
+__device__ float4 wave_pc(const float4 *s,const float4 *brush,float x,float z,float fade,int pressureActive,int slopes){
+ float4 a=region_wave(s,x,z,1,slopes),b=sample_pc(s,x,z,1,slopes),d=pressureActive!=0?local_pressure(s,brush,x,z,1,slopes):make_float4(0,0,0,0);
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
 // Diagnostic only: compare reconstruction against an independent Fourier oracle.
@@ -164,8 +189,8 @@ __global__ void sample_quality_probe(const float4 *surface,const float4 *coeffic
 }
 // An untouched pressure cascade is zero. Skip its bilinear reads until the
 // first gesture; preserve the same additions and fading in both paths.
-__device__ float4 wave(const float4 *s,float x,float z,float fade,int pressureActive){
- float4 a=sample(s,x,z,0),b=sample(s,x,z,1),d=pressureActive!=0?sample(s,x,z,2):make_float4(0,0,0,0);
+__device__ float4 wave(const float4 *s,const float4 *brush,float x,float z,float fade,int pressureActive){
+ float4 a=region_wave(s,x,z,0,1),b=sample(s,x,z,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,1):make_float4(0,0,0,0);
  // Fade unresolved short displacement as well as its normal near the horizon.
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
@@ -174,19 +199,27 @@ __device__ float sample_height(const float4 *s,float x,float z,int c){
  float a=fract(u),b=fract(v);
  return mixf(mixf(s[base+wrap128(iz)*128+wrap128(ix)].x,s[base+wrap128(iz)*128+wrap128(ix+1)].x,a),mixf(s[base+wrap128(iz+1)*128+wrap128(ix)].x,s[base+wrap128(iz+1)*128+wrap128(ix+1)].x,a),b);
 }
+// Diagnostics: query the actual interaction and regional background fields.
+__global__ void domain_probe(const float4 *surface,const float4 *coefficients,const float4 *brush,const float4 *points,float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
+ float4 p=points[i];output[i*4]=local_pressure(surface,brush,p.x,p.y,0,1);
+ output[i*4+1]=local_pressure(coefficients,brush,p.x,p.y,1,1);
+ output[i*4+2]=region_wave(coefficients,p.x,p.y,1,1);
+ output[i*4+3]=sample(surface,p.x-brush[2].x,p.y-brush[2].y,2);
+}
 // Slow, bounded sediment transport proxy driven by the resolved FFT, not a
 // separate animated noise field. Long-wave orbital forcing and local pressure
 // redistribute the ripple phase; short waves are attenuated at the bed.
 // State is retained when paused or when the water becomes deep.
-__global__ void sand_transport(const float4 *surface,float4 *sandState,float dt,float depth,int pressureActive){
+__global__ void sand_transport(const float4 *brush,const float4 *surface,float4 *sandState,float dt,float depth,int pressureActive){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
  if(x>=128||z>=128)return;
  int i=z*128+x;float4 old=sandState[i];
  float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);
  float4 w=surface[16384+i];
  float shortBed=expf(-6.2831853f*depth/6);
- float4 a=sample(surface,(float)x*.75f,(float)z*.75f,0);
- float4 d=pressureActive!=0?sample(surface,(float)x*.75f,(float)z*.75f,2):make_float4(0,0,0,0);
+ float4 a=region_wave(surface,(float)x*.75f,(float)z*.75f,0,1);
+ float4 d=pressureActive!=0?local_pressure(surface,brush,(float)x*.75f,(float)z*.75f,0,1):make_float4(0,0,0,0);
  float forcing=5*(w.x+shortBed*a.x+d.x*expf(-depth*.8f));
  float rate=shallow*(forcing+8*(w.y*fabsf(w.y)+w.z*fabsf(w.z)));
  float step=fminf(.05f,fmaxf(0,dt));
@@ -194,8 +227,8 @@ __global__ void sand_transport(const float4 *surface,float4 *sandState,float dt,
  float next=old.x+step*(rate/(1+old.x*old.x*.25f)-shallow*.015f*old.x);
  sandState[i]=make_float4(next,0,0,0);
 }
-__device__ float wave_height(const float4 *s,float x,float z,float distance,int pressureActive){
- float a=sample_height(s,x,z,0),b=sample_height(s,x,z,1),d=pressureActive!=0?sample_height(s,x,z,2):0;
+__device__ float wave_height(const float4 *s,const float4 *brush,float x,float z,float distance,int pressureActive){
+ float4 region=wave_region(x,z);float a=sample_height(s,x,z+region.x,0),b=sample_height(s,x,z,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,0).x:0;
  float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
 }
 // Camera basis and depth-only optical factors are computed once per frame.
@@ -219,6 +252,7 @@ __global__ void camera_step(float4 *camera,float dt,float forward,float side,flo
 // Project the pointer to the actual FFT surface on the GPU, retaining the
 // previous hit so a held drag injects force along its world-space path.
 __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *brush,float pointerX,float pointerY,float aspect,int held,int moving,int pressureActive){
+ float4 domain=brush[2];domain.z=0;brush[2]=domain;
  float4 old=brush[1];brush[0]=make_float4(0,0,0,0);
  if(held==0){brush[1]=make_float4(old.x,old.y,0,0);return;}
  float4 p=camera[0],r=camera[1];
@@ -227,8 +261,10 @@ __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *br
  float3 ray=unit(plus(f,plus(scale(right,pointerX*aspect*.65f),scale(up,pointerY*.65f))));
  if(ray.y>-.06f){brush[1]=make_float4(old.x,old.y,0,0);return;}
  float t=-p.y/ray.y;
- for(int j=0;j<4;j++){float h=wave_height(surface,p.x+ray.x*t,p.z+ray.z*t,t,pressureActive);t=mixf(t,(h-p.y)/ray.y,.75f);}
+ for(int j=0;j<4;j++){float h=wave_height(surface,brush,p.x+ray.x*t,p.z+ray.z*t,t,pressureActive);t=mixf(t,(h-p.y)/ray.y,.75f);}
  float x=p.x+ray.x*t,z=p.z+ray.z*t;
+ if(domain.w==0||fabsf(x-domain.x)>6||fabsf(z-domain.y)>6){domain=make_float4(x,z,1,1);brush[2]=domain;}
+
  float dx=old.z>.5f&&moving!=0?x-old.x:0,dz=old.z>.5f&&moving!=0?z-old.y:0;
  // Bound a single event's travel so a camera teleport cannot create an explosion.
  float len=sqrtf(dx*dx+dz*dz),limit=fminf(1,.7f/fmaxf(.00001f,len));dx*=limit;dz*=limit;
@@ -238,7 +274,7 @@ __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *br
 // Both the height and vertical velocity are complex Fourier coefficients.
 __global__ void force_modes(float4 *disturbance,const float4 *brush,const float *motion,float dt,int clear){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=128||z>=128)return;
- int idx=z*128+x;float4 state=disturbance[idx];
+ int idx=z*128+x;float4 state=brush[2].z!=0?make_float4(0,0,0,0):disturbance[idx];
  if(clear!=0||x==64||z==64||(x==0&&z==0)){disturbance[idx]=make_float4(0,0,0,0);return;}
  float4 b=brush[0];float distance=sqrtf(b.z*b.z+b.w*b.w);
  if(distance==0&&state.x==0&&state.y==0&&state.z==0&&state.w==0)return;
@@ -250,7 +286,7 @@ __global__ void force_modes(float4 *disturbance,const float4 *brush,const float 
  float pr=0,pi=0;
  if(distance>0)for(int j=0;j<4;j++){
   float t=((float)j+.5f)/4,px=b.x-b.z*(1-t),pz=b.y-b.w*(1-t);
-  float phase=kx*px+kz*pz;pr+=cosf(phase)*.25f;pi-=sinf(phase)*.25f;
+  float phase=kx*(px-brush[2].x)+kz*(pz-brush[2].y);pr+=cosf(phase)*.25f;pi-=sinf(phase)*.25f;
  }
  // Displacement impulse from the moving pressure brush; exact free evolution
  // after release provides propagating wakes instead of a drawn height mask.
@@ -501,6 +537,7 @@ __global__ void caustic_resolve(const unsigned *photons,float4 *light,float *mon
  if(dispersion==0)monoLight[z*lightSize+x]=r;else light[z*lightSize+x]=make_float4(r,g,b,1);
 }
 __device__ float3 caustic(const float4 *light,const float *monoLight,float x,float z,int dispersion,int lightSize){
+ z+=wave_region(x,z).x;
  float offset=lightSize>256?.5f:0;
  float u=fract(x/6)*(float)lightSize-offset,v=fract(z/6)*(float)lightSize-offset;int ix=((int)floorf(u))&(lightSize-1),iz=((int)floorf(v))&(lightSize-1);float a=fract(u),b=fract(v);
  // Mobile sunlight has identical RGB channels. Read and interpolate it once.
@@ -512,7 +549,7 @@ __device__ float3 caustic(const float4 *light,const float *monoLight,float x,flo
  return vec(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b));
 }
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
-__device__ float3 shade_pixel(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
+__device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
  int smooth=lightSize>256?1:0;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -520,10 +557,10 @@ __device__ float3 shade_pixel(const float4 *surface,const float4 *coefficients,c
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
  if(ray.y<-.0005f){
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
- w=smooth!=0?wave_pc(coefficients,p.x,p.z,causticDetail,pressureActive,1):wave(surface,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));
@@ -547,7 +584,7 @@ __device__ float3 shade_pixel(const float4 *surface,const float4 *coefficients,c
  float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
  return col;
 }
-__device__ float3 shade_pixel_pc(const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
+__device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
  int smooth=lightSize>256?1:0;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -555,10 +592,10 @@ __device__ float3 shade_pixel_pc(const float4 *sandState,const float4 *surface,c
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
  if(ray.y<-.0005f){
  float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
- w=smooth!=0?wave_pc(coefficients,p.x,p.z,causticDetail,pressureActive,1):wave(surface,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));
@@ -593,18 +630,18 @@ __device__ unsigned pack_color(float3 col){
  return rr|(gg<<8)|(bb<<16)|4278190080u;
 }
 // Keep the one-sample shader separate from the PC supersampling path.
-__global__ void render(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
+__global__ void render(const float4 *brush,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
- float3 col=shade_pixel(surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
+ float3 col=shade_pixel(brush,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
  image[y*width+x]=pack_color(col);
 }
 // PC spatial supersampling: average linear radiance before tone mapping.
 // FFT and lighting are shared across all four samples; no extra framebuffer.
-__global__ void render_pc(const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
+__global__ void render_pc(const float4 *brush,const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float3 col=vec(0,0,0);
  for(int j=0;j<2;j++)for(int i=0;i<2;i++){
-  float3 sample=shade_pixel_pc(sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
+  float3 sample=shade_pixel_pc(brush,sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
   col=plus(col,sample);
  }
  image[y*width+x]=pack_color(scale(col,.25f));
@@ -612,8 +649,8 @@ __global__ void render_pc(const float4 *sandState,const float4 *surface,const fl
 
 // Diagnostic PC single sampling retains the same materials and relief as PC
 // multisampling. Mobile's entry never depends on these material functions.
-__global__ void render_pc_single(const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
+__global__ void render_pc_single(const float4 *brush,const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
- float3 col=shade_pixel_pc(sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
+ float3 col=shade_pixel_pc(brush,sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
  image[y*width+x]=pack_color(col);
 }
