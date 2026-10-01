@@ -32,7 +32,7 @@ try{
  const beyondPole=await page.evaluate(()=>waterLab.planetState());assert.ok(beyondPole.finite&&beyondPole.normal[2]<-.999999);
  await page.locator('#reset').click();await page.waitForTimeout(80);await page.locator('#toggle').click();
  // Actual wheel input performs a continuous dolly from metres to orbital height.
- await page.mouse.move(900,600);for(let i=0;i<6;i++){await page.mouse.wheel(0,800);await page.waitForTimeout(250);}await page.waitForTimeout(1400);
+ await page.mouse.move(900,600);await page.keyboard.down('Control');for(let i=0;i<6;i++){await page.mouse.wheel(0,800);await page.waitForTimeout(250);}await page.keyboard.up('Control');await page.waitForTimeout(1400);
  const zoomed=await page.evaluate(()=>waterLab.planetState());assert.ok(zoomed.altitude>1000000&&zoomed.speed>100000);
  await page.screenshot({path:'captures/planet-wheel-to-space.png'});
  await page.locator('#toggle').click();await page.locator('#fly').click();await page.waitForFunction(()=>document.pointerLockElement===document.querySelector('canvas'));

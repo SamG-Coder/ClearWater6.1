@@ -71,15 +71,28 @@ __global__ void prepare_modes(float *motion,float depth){
  int idx=z*128+x;motion[c*16384+idx]=omega;
  if(c==2){motion[49152+idx]=expf(-kk*.24f*.24f*.5f);motion[65536+idx]=.32f+.009f*kk;}
 }
-__global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturbance,const float *motion,float time,float energy){
+__global__ void spectrum(float2 *output,const float4 *seed,const float4 *disturbance,const float *motion,const float4 *camera,float *seaMemory,float time,float energy){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
  if(x>=128||z>=128||c>=3)return;
  if(c==2){float4 d=disturbance[z*128+x];output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2(d.x,d.y);return;}
  float4 h=seed[c*16384+z*128+x];float2 a=make_float2(h.x,h.y),b=make_float2(h.z,h.w);
+
+ float amplitude=1;
+ if(camera[13].w!=0){
+  int fx=x==64?0:(x<64?x:x-128),fz=z==64?0:(z<64?z:z-128);float kk=(float)(fx*fx+fz*fz);
+  float4 wind=camera[10];float projection=((float)fx*wind.x+(float)fz*wind.y)/fmaxf(.1f,wind.z);
+  float original=(float)fx*.6f-(float)fz*.8f;
+  float directional=(.20f*kk+.80f*projection*projection)/fmaxf(.001f,.12f*kk+.88f*original*original);
+  float ratio=wind.z/fmaxf(2,camera[15].x),strength=fminf(4.0f,fmaxf(.30f,ratio));
+  float target=fminf(5,fmaxf(.18f,directional*strength)),old=seaMemory[c*16384+z*128+x];if(old<=0)old=1;
+  float4 lag=camera[14];float response=c==0?(target<old?lag.y:lag.x):(target<old?lag.w:lag.z);
+  float next=mixf(old,target,response);seaMemory[c*16384+z*128+x]=next;amplitude=sqrtf(next);
+ }else seaMemory[c*16384+z*128+x]=1;
+ float waveEnergy=energy*amplitude;
  float phase=motion[c*16384+z*128+x]*time;
  float2 p=make_float2(cosf(phase),sinf(phase));
  float2 u=cmul(a,p),v=cmul(make_float2(b.x,-b.y),make_float2(p.x,-p.y));
- output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2((u.x+v.x)*energy,(u.y+v.y)*energy);
+ output[c*16384+reverse7(z)*128+reverse7(x)]=make_float2((u.x+v.x)*waveEnergy,(u.y+v.y)*waveEnergy);
 }
 __global__ void fft_stage(const float2 *input,float2 *output,int span,int axis){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y,c=blockIdx.z;
@@ -318,7 +331,7 @@ __global__ void camera_step(float4 *camera,float2 *navigationState,float dt,floa
  camera[4]=make_float4(-yawSin*pitchSin,pitchCos,yawCos*pitchSin,0);
  float3 normal=vec((float)nav0,(float)nav1,(float)nav2),east=vec((float)nav3,(float)nav4,(float)nav5),back=crossv(east,normal);
  camera[5]=make_float4(east.x,east.y,east.z,r.x);camera[6]=make_float4(normal.x,normal.y,normal.z,r.y);camera[7]=make_float4(back.x,back.y,back.z,0);
- camera[8]=make_float4(p.y,fminf(30000000.0f,speed*fmaxf(1,p.y*.06f)),earth_radius(),0);
+ camera[8]=make_float4(p.y,fminf(30000000.0f,speed*fmaxf(1,p.y*.06f)),earth_radius(),r.z);
  float3 sun=unit(vec(-.42f,.63f,.66f));camera[9]=make_float4(dotv(sun,east),dotv(sun,normal),dotv(sun,back),0);
  {float hi=(float)nav0;navigationState[0]=make_float2(hi,(float)(nav0-(double)hi));}
  {float hi=(float)nav1;navigationState[1]=make_float2(hi,(float)(nav1-(double)hi));}
@@ -459,13 +472,13 @@ __device__ float3 rock_join(float3 a,float3 b){
 }
 // A rounded pebble cap is real bed height, with derivatives matching its
 // geometry. w carries stone tone + 1, or a negative contact-shadow amount.
-__device__ float4 stone_relief(float x,float z,float footprint){
+__device__ float4 stone_relief(float x,float z,float footprint,float3 sun){
  float fade=clamp01((.065f-footprint)/.035f);
  if(fade<=0)return make_float4(0,0,0,0);
  // This bound includes the maximum cap and shadow extent.
  if(materialNoise(x*.7f+83,z*.7f-19)<.32f)return make_float4(0,0,0,0);
  float gx=floorf(x*7),gz=floorf(z*7),height=0,gradientX=0,gradientZ=0,tone=-1,shadow=0;
- float3 sun=sunDir();float vertical=sqrtf(1-.7502f*.7502f*(1-sun.y*sun.y));
+ float vertical=sqrtf(1-.7502f*.7502f*(1-sun.y*sun.y));
  float shadowX=.7502f*sun.x/vertical,shadowZ=.7502f*sun.z/vertical;
  for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
   float cx=gx+(float)i,cz=gz+(float)j,seed=cell(cx,cz);
@@ -503,7 +516,7 @@ __device__ float4 stone_relief(float x,float z,float footprint){
  return make_float4(height,gradientX,gradientZ,tone>=0?tone+1:-shadow);
 }
 __device__ float bottom_pc(float x,float z,float depth,float footprint,float4 drift,float anchorX,float anchorZ){
- return bottom(x,z,depth)+sand_moving(x,z,footprint,drift,anchorX,anchorZ).x+stone_relief(x,z,footprint).x;
+ return bottom(x,z,depth)+sand_moving(x,z,footprint,drift,anchorX,anchorZ).x+stone_relief(x,z,footprint,sunDir()).x;
 }
 __device__ float3 seabed_pc(float x,float z,float footprint,float4 sand,float4 stone,float3 sun,float3 view){
  float broad=materialNoise(x*.42f,z*.42f),mid=materialNoise(x*3.1f+17,z*3.1f),fine=1/(1+footprint*footprint*80000);
@@ -535,9 +548,9 @@ __global__ void bed_quality_probe(float4 *output,int count){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
  float x=((float)(i%64)-32)*.0913f,z=((float)(i/64)-32)*.0971f,e=.0001f;
  float4 drift=make_float4(.7f,.2f,-.3f,0);
- float4 sand=sand_moving(x,z,.001f,drift,0,0),stone=stone_relief(x,z,.001f);
+ float4 sand=sand_moving(x,z,.001f,drift,0,0),stone=stone_relief(x,z,.001f,sunDir());
  float sx=(sand_moving(x+e,z,.001f,drift,0,0).x-sand_moving(x-e,z,.001f,drift,0,0).x)/(2*e),sz=(sand_moving(x,z+e,.001f,drift,0,0).x-sand_moving(x,z-e,.001f,drift,0,0).x)/(2*e);
- float4 a=stone_relief(x+e,z,.001f),b=stone_relief(x-e,z,.001f),c=stone_relief(x,z+e,.001f),d=stone_relief(x,z-e,.001f);
+ float4 a=stone_relief(x+e,z,.001f,sunDir()),b=stone_relief(x-e,z,.001f,sunDir()),c=stone_relief(x,z+e,.001f,sunDir()),d=stone_relief(x,z-e,.001f,sunDir());
  output[i*3]=sand;output[i*3+1]=stone;
  output[i*3+2]=make_float4(sx,sz,(a.x-b.x)/(2*e),(c.x-d.x)/(2*e));
 }
@@ -549,12 +562,12 @@ __global__ void caustic_clear(unsigned *photons,int dispersion,int lightSize){
  if(dispersion==0){photons[z*lightSize+x]=0;return;}
  int id=(z*lightSize+x)*4;photons[id]=0;photons[id+1]=0;photons[id+2]=0;photons[id+3]=0;
 }
-__global__ void caustic_map(const float4 *surface,unsigned *photons,float depth,int rays,int dispersion,int lightSize){
+__global__ void caustic_map(const float4 *surface,const float4 *camera,unsigned *photons,float depth,int rays,int dispersion,int lightSize){
  int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
  if(x>=rays||z>=rays)return;
  float wx=((float)x+.5f)*6/(float)rays,wz=((float)z+.5f)*6/(float)rays;
  float4 w=lightSize>256?sample_pc(surface,wx,wz,0,1):sample(surface,wx,wz,0);
- float3 n=unit(vec(-w.y,1,-w.z)),incident=scale(sunDir(),-1);
+ float3 n=unit(vec(-w.y,1,-w.z)),incident=scale(camera[13].w!=0?unit(vec(camera[9].x,fmaxf(.02f,camera[9].y),camera[9].z)):sunDir(),-1);
  int channels=dispersion!=0?3:1;
  for(int c=0;c<channels;c++){
   float eta=dispersion==0?.7502f:(c==0?.7524f:(c==1?.7502f:.7480f));
@@ -638,25 +651,291 @@ __device__ float globe_noise(float3 p){
   value+=randf(h)*(i==0?1-x:x)*(j==0?1-y:y)*(k==0?1-z:z);
  }return value;
 }
+
+// Global weather is a deterministic, driven circulation approximation, not a
+// forecast. All coordinates are Earth-fixed unit vectors: no longitude seam.
+// Wind-memory and rain-plane ideas are adapted from ../ClearWater, with the
+// planar passing front replaced by moving spherical pressure systems.
+__device__ float3 rotate_y(float3 p,float angle){float c=cosf(angle),v=sinf(angle);return vec(c*p.x+v*p.z,p.y,-v*p.x+c*p.z);}
+__device__ float3 globe_sun(float clock,float season){
+ float day=clock/86400,declination=.3977885f*sinf((season+day-81)*.01720242f);
+ float angle=(.5f-fract(day))*6.2831853f,c=sqrtf(1-declination*declination);
+ return vec(sinf(angle)*c,declination,cosf(angle)*c);
+}
+__device__ float4 weather_cell(float3 n,float clock,float season,int component){
+ float days=clock/86400,ay=fabsf(n.y),summer=.07f*sinf((season+days-81)*.01720242f);
+ float tropics=expf(-(n.y-summer)*(n.y-summer)*120),mid=expf(-(ay-.70f)*(ay-.70f)*40);
+ float dry=expf(-(ay-.43f)*(ay-.43f)*90),polar=eased(.80f,.98f,ay);
+ float3 east=vec(n.z,0,-n.x),north=minus(vec(0,1,0),scale(n,n.y));
+ float zonal=-7+24*mid-4*polar;
+ float meridional=-4*sinf(n.y*6.2831853f);
+ float3 velocity=plus(scale(east,zonal),scale(north,meridional));
+ float depression=0,front=0;
+ for(int i=0;i<6;i++){
+  float hemisphere=i<3?1.0f:-1.0f,fi=(float)i;
+  float latitude=hemisphere*(.46f+.15f*sinf(fi*2.3f+days*.19f));
+  float longitude=fi*2.3999632f+.7f+days*(.14f+.03f*sinf(fi*7));
+  float co=sqrtf(1-latitude*latitude);float3 centre=vec(sinf(longitude)*co,latitude,cosf(longitude)*co);
+  float cosine=dotv(n,centre),radius=.105f+.028f*sinf(fi*3.1f+1);
+  float r2=fmaxf(0,2*(1-cosine))/(radius*radius);
+  if(r2>36)continue;
+  float life=.52f+.48f*sinf(days*.67f+fi*1.73f),strength=.40f+.60f*life*life;
+  float core=expf(-r2*.5f)*strength;
+  float3 inward=minus(centre,scale(n,cosine));
+  // Opposite circulation in each hemisphere; vanishes continuously at a pole.
+  velocity=plus(velocity,scale(crossv(n,inward),-hemisphere*260*core));
+  velocity=plus(velocity,scale(inward,32*core));
+  depression+=core;
+  float3 tangentEast=vec(centre.z,0,-centre.x),tangentNorth=minus(vec(0,1,0),scale(centre,centre.y));
+  float x=dotv(n,tangentEast)/radius,z=dotv(n,tangentNorth)/radius;
+  float angle=atan2f(z,x)*hemisphere+sqrtf(r2)*2.3f-days*.4f;
+  float band=.5f+.5f*cosf(angle);
+  front+=expf(-r2*.12f)*strength*(.25f+.75f*band*band);
+ }
+ if(component!=0)return make_float4(velocity.x,velocity.y,velocity.z,clamp01(depression));
+ // Differential advection follows the prevailing east/west wind belts.
+ float3 q=rotate_y(n,-days*zonal*.01356f);
+ float broad=globe_noise(plus(scale(q,9),vec(days*.018f,3,7)));
+ float detail=globe_noise(plus(scale(q,27),vec(11,days*.024f,-9)));
+ float cover=clamp01(.16f+.36f*tropics+.20f*mid-.26f*dry+.62f*front+(broad-.5f)*1.1f+(detail-.5f)*.32f);
+ float rain=eased(.57f,.93f,cover)*clamp01(.30f*tropics+depression*.9f+front*.35f);
+ float heat=dotv(n,globe_sun(clock,season));
+ float temperature=29-53*n.y*n.y+3*heat-cover*2;
+ return make_float4(cover,rain,temperature,1016+9*dry-30*clamp01(depression));
+}
+// Padded storage after the small camera state keeps render bindings within
+// WebGPU's portable eight-storage-buffer limit, including the PC sand renderer.
+// [32, 65568): two global maps; [65568, 131104): cached hemispherical sky.
+__device__ float4 weather_map_sample(const float4 *camera,float3 n,int component){
+ int width=(int)camera[13].z,height=width/2,count=width*height;
+ float u=(atan2f(n.x,n.z)/6.2831853f+.5f)*(float)width-.5f;
+ float v=(.5f-atan2f(n.y,sqrtf(n.x*n.x+n.z*n.z))/3.14159265f)*(float)height-.5f;
+ int x=(int)floorf(u),y=(int)floorf(v);float a=fract(u),b=fract(v);float4 out=make_float4(0,0,0,0);
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){
+  int yy=y+j,xx=x+i;
+  // Reflect over a pole and turn longitude by 180 degrees, never clamp a row.
+  if(yy<0){yy=-yy-1;xx+=width/2;}if(yy>=height){yy=2*height-yy-1;xx+=width/2;}
+  float4 p=camera[32+component*count+yy*width+(xx&(width-1))];
+  float weight=(i==0?1-a:a)*(j==0?1-b:b);
+  out.x+=p.x*weight;out.y+=p.y*weight;out.z+=p.z*weight;out.w+=p.w*weight;
+ }return out;
+}
+__global__ void weather_map(float4 *camera,float clock,float season,int mapSize){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
+ if(x>=mapSize||y>=mapSize/2)return;
+ float lon=(((float)x+.5f)/(float)mapSize-.5f)*6.2831853f,lat=(.5f-((float)y+.5f)/(float)(mapSize/2))*3.14159265f;
+ float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));int id=y*mapSize+x;
+ camera[32+id]=weather_cell(n,clock,season,0);camera[32+mapSize*mapSize/2+id]=weather_cell(n,clock,season,1);
+}
+__device__ float cloud_density(const float4 *camera,float3 normal,int layer){
+ float cover=weather_map_sample(camera,normal,0).x;
+ if(cover<.04f)return 0;
+ float days=camera[13].x/86400,ay=fabsf(normal.y);
+ float mid=expf(-(ay-.7f)*(ay-.7f)*40),zonal=-7+24*mid-4*eased(.8f,.98f,ay);
+ float3 q=rotate_y(normal,-days*zonal*.01356f);
+ // Four filtered bands retain wisps and structure within large systems.
+ float coarse=globe_noise(plus(scale(q,31),vec(11,17,31)));
+ float medium=globe_noise(plus(scale(q,83),vec(3,29,7)));
+ float fine=globe_noise(scale(q,211));
+ float detail=globe_noise(scale(q,layer==0?823:397));
+ float resolved=1-eased(30000,300000,camera[0].y);
+ float shape=coarse*.42f+medium*.30f+fine*.20f+mixf(.5f,detail,resolved)*.08f;
+ float threshold=.59f-cover*.31f;
+ float density=fmaxf(0,shape-threshold)*3.2f;
+ return clamp01(density)*(.60f+.40f*medium)*(layer==0?1.0f:.35f)*eased(.03f,.35f,cover);
+}
+__global__ void weather_update(float4 *camera,float clock,float season,float time,float dt,float baseWind,int enabled,int mapSize,int skyWidth,int refresh){
+ float3 n=vec(camera[6].x,camera[6].y,camera[6].z),east=vec(camera[5].x,camera[5].y,camera[5].z),back=vec(camera[7].x,camera[7].y,camera[7].z);
+ camera[13]=make_float4(clock,time,(float)mapSize,(float)enabled);
+ camera[16]=make_float4((float)skyWidth,(float)(skyWidth/4),65568,(float)(mapSize*mapSize/2));
+ float3 sun=enabled!=0?globe_sun(clock,season):unit(vec(-.42f,.63f,.66f));
+ camera[9]=make_float4(dotv(sun,east),dotv(sun,n),dotv(sun,back),0);
+ camera[12]=make_float4(sun.x,sun.y,sun.z,(.5f-fract(clock/86400))*6.2831853f);
+ float4 field=weather_map_sample(camera,n,0),flow=weather_map_sample(camera,n,1);
+ float3 v=vec(flow.x,flow.y,flow.z);float vx=dotv(v,east),vz=dotv(v,back),wind=sqrtf(vx*vx+vz*vz);
+ float4 old=camera[10],previous=camera[18];float change=1-dotv(n,vec(previous.x,previous.y,previous.z));
+ float amount=camera[19].w==0||change>.01f||refresh!=0?1:1-expf(-dt/25);
+ float x=mixf(old.x,vx,amount),z=mixf(old.y,vz,amount),speed=sqrtf(x*x+z*z);
+ camera[10]=make_float4(x,z,speed,enabled!=0?field.x:0);
+ float direct=1;
+ if(enabled!=0){
+  float mu=fmaxf(.12f,dotv(sun,n));
+  float3 projected=unit(plus(n,scale(minus(sun,scale(n,dotv(n,sun))),2500/(earth_radius()*mu))));
+  direct=expf(-(cloud_density(camera,projected,0)*2.6f+cloud_density(camera,projected,1)*2.0f));
+ }
+ camera[11]=make_float4(enabled!=0?field.y:0,direct,field.z,field.w);
+ camera[14]=make_float4(1-expf(-dt/45),1-expf(-dt/160),1-expf(-dt/240),1-expf(-dt/800));
+ camera[15]=make_float4(baseWind,v.x,v.y,v.z);
+ float localHour=fract(clock/86400+atan2f(n.x,n.z)/6.2831853f)*24;
+ camera[17]=make_float4(wind,field.y,atan2f(n.y,sqrtf(n.x*n.x+n.z*n.z))*57.29578f,localHour);
+ camera[18]=make_float4(n.x,n.y,n.z,0);camera[19].w=1;
+}
+__global__ void weather_probe(const float4 *points,float4 *output,const float4 *camera,int count,float season){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
+ float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z)),sun=globe_sun(p.w,season);
+ output[i*4]=weather_cell(n,p.w,season,0);output[i*4+1]=weather_cell(n,p.w,season,1);
+ output[i*4+2]=make_float4(sun.x,sun.y,sun.z,dotv(n,sun));output[i*4+3]=weather_map_sample(camera,n,0);
+}
+// A reviewable way to visit an actual rainy cell, not a local storm override.
+__global__ void weather_visit(float4 *camera,float2 *navigationState,float latitude,float longitude,float altitude,int findRain,int mapSize){
+ float lat=latitude*.0174532925f,lon=longitude*.0174532925f;
+ if(findRain!=0){
+  float best=-1;int bx=0,by=0;float3 sun=vec(camera[12].x,camera[12].y,camera[12].z);
+  for(int y=1;y<mapSize/2;y+=2)for(int x=0;x<mapSize;x+=2){
+   float la=(.5f-((float)y+.5f)/(float)(mapSize/2))*3.14159265f,lo=(((float)x+.5f)/(float)mapSize-.5f)*6.2831853f;
+   float3 n=vec(sinf(lo)*cosf(la),sinf(la),cosf(lo)*cosf(la));
+   float score=camera[32+y*mapSize+x].y*(.15f+.85f*clamp01(dotv(n,sun)));
+   if(score>best){best=score;bx=x;by=y;}
+  }
+  lat=(.5f-((float)by+.5f)/(float)(mapSize/2))*3.14159265f;lon=(((float)bx+.5f)/(float)mapSize-.5f)*6.2831853f;
+ }
+ float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat)),east=vec(cosf(lon),0,-sinf(lon));
+ navigationState[0]=make_float2(n.x,0);navigationState[1]=make_float2(n.y,0);navigationState[2]=make_float2(n.z,0);
+ navigationState[3]=make_float2(east.x,0);navigationState[4]=make_float2(east.y,0);navigationState[5]=make_float2(east.z,0);
+ navigationState[6]=make_float2(0,0);navigationState[7]=make_float2(4,0);
+ camera[0]=make_float4(0,altitude,4,0);camera[1]=make_float4(0,-.23f,0,0);camera[5].w=-1000;camera[19].w=0;
+}
+// Two curved cloud decks share the exact density used by near-water shadows.
+// Bounded shell integration avoids a full-screen volumetric march on phones.
+__device__ float4 globe_clouds(float3 ray,const float4 *camera,float ground){
+ float altitude=camera[0].y,R=earth_radius(),trans=1;float3 color=vec(0,0,0),sun=vec(camera[9].x,camera[9].y,camera[9].z);
+ for(int j=0;j<2;j++){
+  int layer=altitude>4000?1-j:j;float shell=layer==0?1600:4400;
+  float2 roots=sphere_roots(altitude,ray,shell);float t=roots.x>0?roots.x:roots.y;
+  if(t<=0||(ground>0&&t>ground))continue;
+  float3 local=unit(vec(ray.x*t,R+altitude+ray.y*t,ray.z*t)),n=to_world(camera,local);
+  float density=cloud_density(camera,n,layer);if(density<.001f)continue;
+  float viewing=fmaxf(.15f,fabsf(dotv(local,ray))),opacity=1-expf(-density*(layer==0?2.8f:1.7f)/viewing);
+  float daylight=eased(-.08f,.26f,dotv(local,sun)),upper=dotv(local,ray)<0?1.0f:.0f;
+  float forward=positive_power(fmaxf(0,dotv(ray,sun)),12);
+  float silver=forward*positive_power(1-density,3)*.9f;
+  float light=.008f+daylight*(.07f+upper*.22f+.60f*expf(-density*1.8f)+silver);
+  float3 lit=scale(blend(vec(.56f,.65f,.75f),vec(1,.97f,.90f),clamp01(upper+silver)),light);
+  color=plus(color,scale(lit,trans*opacity));trans*=1-opacity;
+ }return make_float4(color.x,color.y,color.z,1-trans);
+}
+// View-dependent cloud volume, cached below output resolution. Shadowing is a
+// bounded vertical optical-depth approximation; the density is truly 3D.
+__device__ float4 cloud_volume(float3 ray,const float4 *camera,float ground){
+ float altitude=camera[0].y,R=earth_radius();float2 outer=sphere_roots(altitude,ray,8200),inner=sphere_roots(altitude,ray,800);
+ if(outer.y<=0)return make_float4(0,0,0,0);
+ float start=fmaxf(0,outer.x),end=outer.y;
+ if(altitude<800)start=fmaxf(start,inner.y);
+ else if(inner.x>0)end=fminf(end,inner.x);
+ if(ground>0)end=fminf(end,ground);
+ if(end<=start)return make_float4(0,0,0,0);
+ int steps=camera[16].x>256?24:12;float step=(end-start)/(float)steps,trans=1;float3 color=vec(0,0,0),sun=vec(camera[9].x,camera[9].y,camera[9].z);
+ float phase=.45f+.65f*positive_power(fmaxf(0,dotv(ray,sun)),8);
+ for(int i=0;i<steps;i++){
+  if(trans<.015f)break;
+  float t=start+((float)i+.5f)*step;float3 p=vec(ray.x*t,R+altitude+ray.y*t,ray.z*t);
+  float radius=sqrtf(dotv(p,p)),h=radius-R;float3 local=scale(p,1/radius),normal=to_world(camera,local);
+  float cover=weather_map_sample(camera,normal,0).x;
+  float top=2200+cover*5300,vertical=(h-800)/(top-800);
+  if(vertical<=0||vertical>=1||cover<.08f)continue;
+  float column=cloud_density(camera,normal,0);if(column<.008f)continue;
+  float days=camera[13].x/86400,ay=fabsf(normal.y),zonal=-7+24*expf(-(ay-.7f)*(ay-.7f)*40)-4*eased(.8f,.98f,ay);
+  float3 q=rotate_y(scale(normal,radius*.00065f),-days*zonal*.01356f);
+  float detail=globe_noise(q)*.67f+globe_noise(scale(q,2.37f))*.33f;
+  float envelope=eased(0,.12f,vertical)*(1-eased(.48f,1,vertical));
+  float density=fmaxf(0,column-(1-detail)*.20f)*envelope;
+  if(density<.003f)continue;
+  float mu=dotv(local,sun),daylight=eased(-.08f,.22f,mu);
+  float optical=(top-h)*column*.0017f/fmaxf(.15f,mu);
+  float direct=expf(-optical),fill=.10f+.18f*expf(-density*3);
+  float3 ambient=blend(vec(.055f,.080f,.13f),vec(.34f,.42f,.52f),vertical);
+  float3 lit=plus(scale(ambient,.015f+daylight*(.4f+fill)),scale(vec(1,.96f,.86f),daylight*(direct*.9f+fill*.45f)*phase));
+  float opacity=1-expf(-density*step*.0023f);
+  color=plus(color,scale(lit,trans*opacity));trans*=1-opacity;
+ }
+ return make_float4(color.x,color.y,color.z,1-trans);
+}
+__global__ void weather_cloud_view(float4 *camera,int cloudWidth,int cloudHeight,float aspect){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=cloudWidth||y>=cloudHeight)return;
+ if(x==0&&y==0)camera[20]=make_float4((float)cloudWidth,(float)cloudHeight,0,0);
+ float sx=(2*((float)x+.5f)/(float)cloudWidth-1)*aspect,sy=1-2*((float)y+.5f)/(float)cloudHeight;
+ float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
+ float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));
+ camera[131104+y*cloudWidth+x]=cloud_volume(ray,camera,globe_hit(camera[0].y,ray));
+}
+__device__ float4 cloud_view_sample(const float4 *camera,float sx,float sy){
+ int width=(int)camera[20].x,height=(int)camera[20].y;
+ float u=fminf((float)width-1.001f,fmaxf(0,sx*(float)width-.5f)),v=fminf((float)height-1.001f,fmaxf(0,sy*(float)height-.5f));
+ int x=(int)floorf(u),y=(int)floorf(v);float a=fract(u),b=fract(v);float4 out=make_float4(0,0,0,0);
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){float4 p=camera[131104+(y+j)*width+x+i];float w=(i==0?1-a:a)*(j==0?1-b:b);out.x+=p.x*w;out.y+=p.y*w;out.z+=p.z*w;out.w+=p.w*w;}return out;
+}
+// World-space rain planes and expanding impact normals, adapted from the
+// reference project's approach. Drops run on wave time, independent of clock rate.
+__device__ float3 rain_surface(float x,float z,float time,float rain,float footprint){
+ if(rain<.01f||footprint>.08f)return vec(0,0,0);
+ float u=x*.92387953f+z*.38268343f,v=z*.92387953f-x*.38268343f;
+ float cx=floorf(u/.7f),cz=floorf(v/.7f),nx=0,nz=0;
+ for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
+  float gx=cx+(float)i,gz=cz+(float)j,period=.58f+.45f*cell(gx+791,gz-381),clock=time+cell(gx,gz)*period;
+  float tick=floorf(clock/period),age=clock-tick*period;if(cell(gx+tick*13,gz-tick*7)>rain*.8f)continue;
+  float dx=u-(gx+cell(gx+tick*19,gz+17))*.7f,dz=v-(gz+cell(gx+53,gz+tick*23))*.7f,r=sqrtf(dx*dx+dz*dz),q=r-age*.55f;
+  float width=.0007f+footprint*footprint*2,slope=-q/width*.002f*expf(-q*q/width-age*7)/fmaxf(.008f,r);
+  nx+=slope*dx;nz+=slope*dz;
+ }return vec(nx*.92387953f-nz*.38268343f,0,nx*.38268343f+nz*.92387953f);
+}
+__device__ float rain_volume(float3 origin,float3 ray,float distance,const float4 *camera){
+ float rain=camera[11].x,time=camera[13].y;if(rain<.01f||origin.y>1400)return 0;
+ float result=0,windX=camera[10].x*.16f,windZ=camera[10].y*.16f;
+ for(int axis=0;axis<2;axis++){
+  float dir=axis==0?ray.z:ray.x,along=axis==0?origin.z:origin.x,velocity=axis==0?windZ:windX,transverse=axis==0?windX:windZ;
+  if(fabsf(dir)<.1f)continue;
+  float base=floorf((along-velocity*time)/5),sgn=dir<0?-1.0f:1.0f;
+  for(int i=1;i<=3;i++){
+   float plane=base+sgn*(float)i,t=(plane*5+velocity*time-along)/dir;if(t<.3f||t>distance||t>30)continue;
+   float3 p=plus(origin,scale(ray,t));float u=((axis==0?p.x:p.z)-transverse*time)/.8f,column=floorf(u),v=(p.y+12*time)/2.6f+cell(column,plane)*7,row=floorf(v);
+   if(cell(column+row*17,plane+axis*59)>rain*.35f)continue;
+   float dy=(fract(v)-.5f)*2.6f,dx=(fract(u)-(.2f+.6f*cell(column+row,plane+23)))*.8f+dy*transverse/12,width=.003f+t*.0006f;
+   result+=eased(width*2,0,fabsf(dx))*eased(.23f,.04f,fabsf(dy))*fabsf(dir)*(1-t/40);
+  }
+ }return result;
+}
+
 __device__ float3 space_stars(float3 d){
  float3 q=scale(d,1300);float ix=floorf(q.x),iy=floorf(q.y),iz=floorf(q.z);
  unsigned seed=(unsigned)((int)ix*92837111+(int)iy*689287499+(int)iz*283923481);float chance=randf(seed);
  float glow=chance>.99965f?(.15f+randf(seed+17u)*.7f):0;
  return vec(glow*.84f,glow*.91f,glow);
 }
-__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit){
+__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int cachedCloud,float pixelU,float pixelV){
  float altitude=camera[0].y,R=earth_radius();float4 sl=camera[9];float3 sun=vec(sl.x,sl.y,sl.z),worldRay=to_world(camera,ray);
  float visibility=fmaxf(eased(25000,90000,altitude),1-eased(-.12f,.08f,sun.y));
- float3 color=scale(space_stars(worldRay),visibility);float sunDot=dotv(ray,sun);
+ float3 color=scale(space_stars(camera[13].w!=0?rotate_y(worldRay,camera[13].x*.00007292115f):worldRay),visibility);float sunDot=dotv(ray,sun);
  if(sunDot>.99996f)color=plus(color,vec(18,15,11));
  if(hit>0){
   float3 localNormal=unit(vec(ray.x*hit,R+altitude+ray.y*hit,ray.z*hit)),normal=to_world(camera,localNormal);
   float day=clamp01(dotv(localNormal,sun)),limb=1-clamp01(-dotv(localNormal,ray));
   float basin=globe_noise(scale(normal,7));
-  float3 ocean=blend(vec(.006f,.022f,.065f),vec(.009f,.065f,.09f),basin);
-  color=scale(ocean,.025f+day*1.6f);
-  float3 halfv=unit(minus(sun,ray));float spec=positive_power(fmaxf(0,dotv(halfv,localNormal)),420)*2.0f*day;
-  color=plus(color,scale(vec(1,.86f,.64f),spec));
+  float3 ocean=blend(vec(.002f,.010f,.037f),vec(.004f,.030f,.050f),basin);
+  float3 shadingNormal=localNormal;float wind=7;
+  if(camera[13].w!=0){
+   float4 flow=weather_map_sample(camera,normal,1);wind=sqrtf(flow.x*flow.x+flow.y*flow.y+flow.z*flow.z);
+   // Resolved metre-scale glints fade to a statistical rough surface as the
+   // footprint grows. This avoids drawing a smooth plastic sheet at flight height.
+   float footprint=hit*.001f,detail=1/(1+footprint*footprint*.012f),time=camera[13].y;
+   float warp=detail>.01f?globe_noise(scale(normal,R/240))*4:0;
+   float phase1=dotv(normal,vec(.042f,.011f,.028f))*R-time*.72f+warp;
+   float phase2=dotv(normal,vec(-.017f,.031f,.006f))*R-time*.53f-warp*.7f;
+   float3 variation=plus(scale(vec(.83f,.22f,.55f),cosf(phase1)*.028f),scale(vec(-.47f,.86f,.17f),cosf(phase2)*.023f));
+   variation=scale(minus(variation,scale(normal,dotv(normal,variation))),detail);
+   float3 worldNormal=unit(minus(normal,variation));
+   shadingNormal=vec(dotv(worldNormal,vec(camera[5].x,camera[5].y,camera[5].z)),dotv(worldNormal,vec(camera[6].x,camera[6].y,camera[6].z)),dotv(worldNormal,vec(camera[7].x,camera[7].y,camera[7].z)));
+  }
+  float nv=clamp01(-dotv(shadingNormal,ray)),grazing=1-nv,g2=grazing*grazing,fresnel=.02037f+.97963f*g2*g2*grazing;
+  float3 reflectedRay=minus(ray,scale(shadingNormal,2*dotv(ray,shadingNormal)));
+  float skyElevation=clamp01(dotv(reflectedRay,localNormal));
+  float3 reflected=scale(blend(vec(.36f,.50f,.63f),vec(.035f,.10f,.23f),sqrtf(skyElevation)),.012f+day);
+  if(camera[13].w!=0&&altitude<400)reflected=weather_sky_sample(reflectedRay,camera);
+  color=blend(scale(ocean,.04f+day*1.2f),reflected,fresnel);
+  float3 halfv=unit(minus(sun,ray));float nh=fmaxf(0,dotv(halfv,shadingNormal)),alpha=.035f+.0045f*fminf(25,wind),a2=alpha*alpha;
+  float denominator=nh*nh*(a2-1)+1;
+  float spec=a2/(3.14159265f*denominator*denominator)*.02037f*day*.85f;
+  color=plus(color,scale(vec(1,.87f,.68f),spec));
+  if(camera[13].w==0){
   float3 cloudP=plus(scale(normal,19),vec(2.8f,1.2f,-1.7f));
   float low=globe_noise(cloudP),detail=globe_noise(scale(cloudP,2.73f)),fine=globe_noise(scale(cloudP,7.1f));
   float bands=.055f*sinf(normal.y*31+normal.x*11);
@@ -664,6 +943,7 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit){
   float shadow=cover*.3f;color=scale(color,1-shadow);
   float3 cloudColor=scale(vec(.84f,.88f,.92f),.025f+day*1.2f);
   color=blend(color,cloudColor,cover*.92f);
+  }else{float cover=weather_map_sample(camera,normal,0).x;color=scale(color,1-cover*.38f);}
   color=plus(color,scale(vec(.006f,.017f,.027f),limb*limb*day));
  }
  // Eight samples through a 100 km exponential atmosphere. Rayleigh extinction
@@ -671,22 +951,55 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit){
  float2 atmosphere=sphere_roots(altitude,ray,100000);
  if(atmosphere.y>0){
   float start=fmaxf(0,atmosphere.x),end=hit>0?fminf(hit,atmosphere.y):atmosphere.y;
-  float step=fmaxf(0,end-start)/8;float3 transmission=vec(1,1,1),scatter=vec(0,0,0);
+  int steps=camera[16].x>256?12:8;float span=fmaxf(0,end-start);float3 transmission=vec(1,1,1),scatter=vec(0,0,0);
   float phase=.0596831f*(1+sunDot*sunDot);
-  for(int i=0;i<8;i++){
-   float t=start+((float)i+.5f)*step;float3 p=vec(ray.x*t,R+altitude+ray.y*t,ray.z*t);
+  for(int i=0;i<steps;i++){
+   float a=(float)i/(float)steps,b=(float)(i+1)/(float)steps;
+   if(hit>0&&altitude>100000){a=1-(1-a)*(1-a);b=1-(1-b)*(1-b);}
+   float step=(b-a)*span,t=start+(a+b)*.5f*span;float3 p=vec(ray.x*t,R+altitude+ray.y*t,ray.z*t);
    float radius=sqrtf(dotv(p,p)),h=fmaxf(0,radius-R),density=expf(-h/8500)*step;
    float mu=dotv(scale(p,1/radius),sun),horizon=-sqrtf(fmaxf(0,2*h/R));
    float lit=eased(horizon-.025f,horizon+.025f,mu),slant=8500*expf(-h/8500)/(fmaxf(.04f,mu)+.035f);
    float3 extinction=vec(expf(-density*.0000058f),expf(-density*.0000135f),expf(-density*.0000331f));
    float3 light=vec(expf(-slant*.0000058f),expf(-slant*.0000135f),expf(-slant*.0000331f));
-   float strength=lit*phase*mixf(18,6,eased(20000,150000,altitude));
+   float strength=lit*phase*mixf(18,2.5f,eased(20000,150000,altitude));
    scatter=plus(scatter,vec(transmission.x*(1-extinction.x)*light.x*strength,transmission.y*(1-extinction.y)*light.y*strength,transmission.z*(1-extinction.z)*light.z*strength));
    transmission=vec(transmission.x*extinction.x,transmission.y*extinction.y,transmission.z*extinction.z);
   }
   color=plus(vec(color.x*transmission.x,color.y*transmission.y,color.z*transmission.z),scatter);
  }
+ if(camera[13].w!=0){
+  float4 clouds=cachedCloud!=0?cloud_view_sample(camera,pixelU,pixelV):globe_clouds(ray,camera,hit);
+  // In the lower atmosphere, haze lies between the eye and the clouds. Do not
+  // integrate an entire clear-sky column over an opaque cloud base.
+  float2 roots=sphere_roots(altitude,ray,1600);float cloudDistance=roots.x>0?roots.x:roots.y;
+  float visible=mixf(expf(-fmaxf(0,cloudDistance)*.000055f),1,eased(5000,20000,altitude));
+  color=plus(scale(color,1-clouds.w*visible),scale(vec(clouds.x,clouds.y,clouds.z),visible));
+ }
  return color;
+}
+
+__global__ void weather_sky(float4 *camera,int skyWidth){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y,height=skyWidth/4;
+ if(x>=skyWidth||y>=height||camera[0].y>=400)return;
+ float angle=(((float)x+.5f)/(float)skyWidth)*6.2831853f,e=((float)y+.5f)/(float)height;e=e*e*1.5707963f;
+ float3 ray=vec(sinf(angle)*cosf(e),sinf(e),-cosf(angle)*cosf(e));
+ float3 col=planet_radiance(ray,camera,-1,0,0,0);camera[65568+y*skyWidth+x]=make_float4(col.x,col.y,col.z,1);
+}
+__device__ float3 weather_sky_sample(float3 d,const float4 *camera){
+ int width=(int)camera[16].x,height=width/4;
+ float u=atan2f(d.x,-d.z)*(float)width/6.2831853f-.5f;
+ float v=sqrtf(atan2f(fmaxf(0,d.y),sqrtf(d.x*d.x+d.z*d.z))/1.5707963f)*(float)height-.5f;
+ v=fminf((float)height-1.001f,fmaxf(0,v));int x=(int)floorf(u),y=(int)floorf(v);float a=fract(u),b=fract(v);float3 col=vec(0,0,0);
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){float4 p=camera[65568+(y+j)*width+((x+i)&(width-1))];col=plus(col,scale(vec(p.x,p.y,p.z),(i==0?1-a:a)*(j==0?1-b:b)));}return col;
+}
+__device__ float3 surface_weather(float3 col,float3 ray,const float4 *camera,float distance){
+ float rain=camera[11].x;if(rain<.01f)return col;
+ float daylight=.015f+.985f*eased(-.08f,.3f,camera[9].y);
+ float haze=(1-expf(-fminf(distance,3000)*rain*.0012f));
+ col=blend(col,scale(vec(.17f,.23f,.28f),daylight),haze);
+ float streak=rain_volume(vec(camera[0].x,camera[0].y,camera[0].z),ray,distance,camera);
+ return plus(col,scale(vec(.45f,.55f,.62f),streak*daylight*.4f));
 }
 __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
  int smooth=lightSize>256?1:0;
@@ -697,34 +1010,34 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float4 solar=camera[9];float3 localSun=vec(solar.x,solar.y,solar.z);
  float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
  float vignette=1-.10f*(sx*sx+sy*sy);
- if(globeT<0||planetMix>=1)return scale(planet_radiance(ray,camera,globeT),exposure*vignette);
+ if(globeT<0||planetMix>=1){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
  if(globeT>0){
  float t=globeT;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
- w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y+ray.x*t/earth_radius(),1,-w.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 rain=camera[13].w!=0?rain_surface(p.x,p.z,camera[13].y,camera[11].x,pixelFootprint):vec(0,0,0);float3 n=unit(vec(-w.y-rain.x+ray.x*t/earth_radius(),1,-w.z-rain.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
- float3 reflected=sky(minus(ray,scale(n,2*viewCosine)),localSun);
+ float3 reflection=minus(ray,scale(n,2*viewCosine));float3 reflected=camera[13].w!=0?weather_sky_sample(reflection,camera):sky(reflection,localSun);
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<(smooth!=0?4:2);j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,pixelFootprint),ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
  float opticalDistance=travel+forward.w;
- ca=blend(vec(1,1,1),ca,causticDetail*right.w);
+ float shadow=camera[13].w!=0?camera[11].y:1;ca=scale(blend(vec(1,1,1),ca,causticDetail*right.w*shadow),.32f+.68f*shadow);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
  col=blend(scale(through,.015f+.985f*eased(-.08f,.3f,localSun.y)),reflected,fresnel);
  float3 halfv=unit(minus(localSun,ray));
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
- col=plus(col,scale(vec(1,.89f,.68f),spec));
- float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
+ col=plus(col,scale(vec(1,.89f,.68f),spec*(camera[13].w!=0?camera[11].y*eased(-.02f,.08f,localSun.y):1)));
+ float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);if(camera[13].w!=0)col=surface_weather(col,ray,camera,t);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray,localSun);}
- if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT),planetMix);
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height),planetMix);
  col=scale(col,exposure*vignette);
  return col;
 }
@@ -737,16 +1050,16 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float4 solar=camera[9];float3 localSun=vec(solar.x,solar.y,solar.z);
  float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
  float vignette=1-.10f*(sx*sx+sy*sy);
- if(globeT<0||planetMix>=1)return scale(planet_radiance(ray,camera,globeT),exposure*vignette);
+ if(globeT<0||planetMix>=1){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
  if(globeT>0){
  float t=globeT;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
- w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y+ray.x*t/earth_radius(),1,-w.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 rain=camera[13].w!=0?rain_surface(p.x,p.z,camera[13].y,camera[11].x,pixelFootprint):vec(0,0,0);float3 n=unit(vec(-w.y-rain.x+ray.x*t/earth_radius(),1,-w.z-rain.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
- float3 reflected=sky(minus(ray,scale(n,2*viewCosine)),localSun);
+ float3 reflection=minus(ray,scale(n,2*viewCosine));float3 reflected=camera[13].w!=0?weather_sky_sample(reflection,camera):sky(reflection,localSun);
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
@@ -754,23 +1067,23 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  if(depth<3){float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);drift=sample_pc(sandState,bx/16,bz/16,0,1);drift.x*=shallow;drift.y*=shallow/16;drift.z*=shallow/16;}
  if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint,drift,anchorX,anchorZ)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=vec(0,0,0);
- if(smooth!=0){float4 sand=sand_moving(bx,bz,pixelFootprint,drift,anchorX,anchorZ),stone=stone_relief(bx,bz,pixelFootprint);float3 bedSun=scale(refractv(scale(localSun,-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
+ if(smooth!=0){float4 sand=sand_moving(bx,bz,pixelFootprint,drift,anchorX,anchorZ),stone=stone_relief(bx,bz,pixelFootprint,localSun);float3 bedSun=scale(refractv(scale(localSun,-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
  else bed=seabed(bx,bz,pixelFootprint);
  float3 ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
  float opticalDistance=travel+forward.w;
- ca=blend(vec(1,1,1),ca,causticDetail*right.w);
+ float shadow=camera[13].w!=0?camera[11].y:1;ca=scale(blend(vec(1,1,1),ca,causticDetail*right.w*shadow),.32f+.68f*shadow);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
  col=blend(scale(through,.015f+.985f*eased(-.08f,.3f,localSun.y)),reflected,fresnel);
  float3 halfv=unit(minus(localSun,ray));
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
- col=plus(col,scale(vec(1,.89f,.68f),spec));
- float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
+ col=plus(col,scale(vec(1,.89f,.68f),spec*(camera[13].w!=0?camera[11].y*eased(-.02f,.08f,localSun.y):1)));
+ float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);if(camera[13].w!=0)col=surface_weather(col,ray,camera,t);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray,localSun);}
- if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT),planetMix);
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height),planetMix);
  col=scale(col,exposure*vignette);
  return col;
 }

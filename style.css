@@ -11,3 +11,9 @@
 .touch #fullscreen{color:#ecf8f5}
 
 #toggle,#fullscreen{color:#ecf8f5}#toggle:hover,#fullscreen:hover{color:white;background:#29535dd9}
+
+#weatherPanel{border-top:1px solid #d4ebe62b;padding-top:12px;margin:12px 0}#weatherPanel summary{cursor:pointer;font-size:12px;list-style:none}#weatherPanel summary:before{content:"+ ";opacity:.6}#weatherPanel[open] summary:before{content:"− "}#weatherStatus{display:block;font-size:10px;opacity:.75;margin:6px 0 12px}#weatherPanel .row{gap:8px}#weatherPanel select{font-size:11px}#weatherPanel label{margin-top:10px}
+
+#flightStatus{position:fixed;bottom:52px;left:50%;transform:translateX(-50%);max-width:calc(100% - 32px);padding:10px 16px;border-radius:8px;background:#12343ddd;color:#e7f5f0;font-size:12px;text-align:center;pointer-events:none}#water:focus{outline:none}
+
+aside{max-height:calc(100dvh - 150px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:#719f9770 transparent}#findRain{width:100%;margin-top:4px}
