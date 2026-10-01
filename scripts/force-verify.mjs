@@ -24,9 +24,17 @@ try{
  assert.ok(locality.seamSlopeError<.02,JSON.stringify(locality));
  assert.ok(locality.regionalDifference>1e-4,'Neighboring background regions must differ');
  await page.screenshot({path:'captures/drag-force.png'});
+ // Move to another world region and draw again: the one pressure domain must
+ // follow the brush while still suppressing the neighboring periodic copy.
+ await page.keyboard.down('Shift');await page.keyboard.down('KeyD');await page.waitForTimeout(700);await page.keyboard.up('KeyD');await page.keyboard.up('Shift');
+ await page.mouse.move(730,570);await page.mouse.down();
+ for(let i=0;i<10;i++){await page.mouse.move(730+i*10,570);await page.waitForTimeout(16);}
+ await page.mouse.up();const relocated=await page.evaluate(()=>waterLab.domainTest());
+ assert.ok(Math.abs(relocated.domain[0]-locality.domain[0])>6,JSON.stringify(relocated));
+ assert.ok(relocated.finite&&relocated.local[0]>1e-5);assert.deepEqual(relocated.ghost,[0,0]);
  await page.mouse.move(1100,600);await page.mouse.down({button:'right'});await page.mouse.move(1200,620,{steps:10});await page.mouse.up({button:'right'});await page.waitForTimeout(100);
  const rotated=await page.evaluate(()=>waterLab.inspect());assert.notEqual(rotated.camera[4],cameraBefore[4],'Right drag must still turn camera');
  assert.deepEqual(errors,[]);const benchmark=await page.evaluate(()=>waterLab.benchmark());
- const result={locality,hoverEnergy:hover.forceEnergy,stationaryEnergy:stationary.forceEnergy,draggingEnergy:dragging.forceEnergy,releasedEnergy:released.forceEnergy,draggingHeightMax:dragging.disturbanceMax,releasedHeightMax:released.disturbanceMax,imaginaryResidual:released.imaginaryResidual,cameraUnchangedDuringForce:true,rightDragRotatesCamera:true,benchmark,errors};
+ const result={locality,relocated,hoverEnergy:hover.forceEnergy,stationaryEnergy:stationary.forceEnergy,draggingEnergy:dragging.forceEnergy,releasedEnergy:released.forceEnergy,draggingHeightMax:dragging.disturbanceMax,releasedHeightMax:released.disturbanceMax,imaginaryResidual:released.imaginaryResidual,cameraUnchangedDuringForce:true,rightDragRotatesCamera:true,benchmark,errors};
  await writeFile('captures/force-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}

@@ -4,14 +4,14 @@ import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
 // Reference only our own last published source, never other water examples.
-const referenceCommit=process.env.WATER_REFERENCE_COMMIT||'6860d41',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'}).replace('window.waterLab={','window.waterLab={'+"\n async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},");
+const referenceCommit=process.env.WATER_REFERENCE_COMMIT||'0bb6aea',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'}).replace('window.waterLab={','window.waterLab={'+"\n async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},");
 const oldHtml=execFileSync('git',['show',`${referenceCommit}:index.html`],{encoding:'utf8'});
 const oldBuild=execFileSync('git',['show',`${referenceCommit}:scripts/build.mjs`],{encoding:'utf8'});
-const artifacts=new Map();for(const m of oldSource.matchAll(/__global__ void (\w+)/g)){const name=m[1];artifacts.set(name,JSON.stringify(serializableArtifact(compile(oldSource,{entry:name,workgroupSize:['render','render_pc'].includes(name)&&(oldBuild.includes("name==='render'?[32,2,1]")||oldBuild.includes("['render','render_pc'].includes(name)?[32,2,1]"))?[32,2,1]:name==='fft_local'?[64,1,1]:['camera_step','brush_pick'].includes(name)?[1,1,1]:[8,8,1]}))));}
+const artifacts=new Map();for(const m of oldSource.matchAll(/__global__ void (\w+)/g)){const name=m[1];artifacts.set(name,JSON.stringify(serializableArtifact(compile(oldSource,{entry:name,workgroupSize:['render','render_pc','render_pc_single'].includes(name)?[32,2,1]:['fft_local','sample_quality_probe','bed_quality_probe','domain_probe'].includes(name)?[64,1,1]:['camera_step','brush_pick'].includes(name)?[1,1,1]:[8,8,1]}))));}
 // Generated temporary identifiers and blank lines can change when unrelated
 // CUDA helpers are added. Compare all remaining shader text to the release.
 let lightweightShaderEquivalent=null;
-if(referenceCommit==='6860d41'){
+{
  const normalize=source=>{const ids=new Map();return source.replace(/\bcw_tmp_\d+\b/g,key=>{if(!ids.has(key))ids.set(key,'temporary'+ids.size);return ids.get(key);}).replace(/\s+/g,' ').trim();};
  const current=JSON.parse(await readFile('kernels/render.json','utf8')),previous=JSON.parse(artifacts.get('render'));
  lightweightShaderEquivalent=normalize(current.wgsl)===normalize(previous.wgsl);assert.ok(lightweightShaderEquivalent,'PC material changes must not alter the lightweight shader operations');
