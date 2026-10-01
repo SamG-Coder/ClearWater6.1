@@ -297,6 +297,105 @@ __device__ float3 seabed(float x,float z,float footprint){
  }
  return sand;
 }
+// PC sand is a shallow geometric relief with analytic derivatives. Slowly
+// varying direction, spacing and amplitude break up the uniform stripe field.
+__device__ float4 sand_relief(float x,float z,float footprint){
+ float bend=x*.41f+z*.23f,branch=z*.77f-x*.17f,modulation=x*.29f+z*.37f;
+ float phase=z*31+x*2.4f+2.8f*sinf(bend)+1.1f*sinf(branch);
+ float phaseX=2.4f+1.148f*cosf(bend)-.187f*cosf(branch),phaseZ=31+.644f*cosf(bend)+.847f*cosf(branch);
+ float detail=1/(1+footprint*footprint*1100),amp=(.0065f+.0025f*sinf(modulation))*detail;
+ float ampX=.000725f*cosf(modulation)*detail,ampZ=.000925f*cosf(modulation)*detail;
+ float ridge=cosf(phase)+.18f*cosf(2*phase+.6f),derivative=-sinf(phase)-.36f*sinf(2*phase+.6f);
+ return make_float4(amp*ridge,ampX*ridge+amp*derivative*phaseX,ampZ*ridge+amp*derivative*phaseZ,phase);
+}
+// Rounded joins between irregular rock faces, carrying shape derivatives.
+__device__ float3 rock_join(float3 a,float3 b){
+ float h=clamp01(.5f+.5f*(a.x-b.x)/.09f);
+ return vec(mixf(b.x,a.x,h)+.09f*h*(1-h),mixf(b.y,a.y,h),mixf(b.z,a.z,h));
+}
+// A rounded pebble cap is real bed height, with derivatives matching its
+// geometry. w carries stone tone + 1, or a negative contact-shadow amount.
+__device__ float4 stone_relief(float x,float z,float footprint){
+ float fade=clamp01((.065f-footprint)/.035f);
+ if(fade<=0)return make_float4(0,0,0,0);
+ // This bound includes the maximum cap and shadow extent.
+ if(materialNoise(x*.7f+83,z*.7f-19)<.32f)return make_float4(0,0,0,0);
+ float gx=floorf(x*7),gz=floorf(z*7),height=0,gradientX=0,gradientZ=0,tone=-1,shadow=0;
+ float3 sun=sunDir();float vertical=sqrtf(1-.7502f*.7502f*(1-sun.y*sun.y));
+ float shadowX=.7502f*sun.x/vertical,shadowZ=.7502f*sun.z/vertical;
+ for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
+  float cx=gx+(float)i,cz=gz+(float)j,seed=cell(cx,cz);
+  float px=(cx+cell(cx+23,cz-87))/7,pz=(cz+cell(cx-71,cz+53))/7;
+  float dx=x-px,dz=z-pz,radius=.018f+.036f*seed,cap=(.002f+.007f*seed)*fade;
+  // Reject candidates before evaluating density or cap trigonometry.
+  if(dx*dx+dz*dz>radius*radius*3)continue;
+  // Density is evaluated at the stone centre, preserving whole objects.
+  float density=clamp01((materialNoise(px*.7f+83,pz*.7f-19)-.55f)*5);
+  if(cell(cx+131,cz-211)>density)continue;
+  float angle=seed*6.2831853f,co=cosf(angle),si=sinf(angle),ax=radius*(.82f+.25f*seed),az=radius*(.74f+.17f*cell(cx-83,cz+29));
+  float rx=dx*co-dz*si,rz=dx*si+dz*co,invX=1/(ax*ax),invZ=1/(az*az),u=rx/ax,v=rz/az;
+  // Unequal convex faces form stone chips, rather than identical ellipses.
+  float3 face=rock_join(vec(u,1,0),vec(-u*.91f+v*.16f,-.91f,.16f));
+  face=rock_join(face,vec(v*(.92f+.13f*seed)+u*.14f,.14f,.92f+.13f*seed));
+  face=rock_join(face,vec(-v*.88f+u*.21f,.21f,-.88f));
+  face=rock_join(face,vec(u*.69f+v*.71f,.69f,.71f));
+  face=rock_join(face,vec(-u*.74f-v*.62f,-.74f,-.62f));
+  float q=face.x;
+  if(q<1){
+   // Low, partly buried stones with irregular shoulders and a tilted top.
+   // The cubic shoulder joins the top and sand with continuous normals.
+   float edge=clamp01((1-q)/.65f),profile=edge*edge*(3-2*edge),tilt=1+.12f*u+.07f*v;
+   float derivative=edge>0&&edge<1?-6*edge*(1-edge)/.65f:0;
+   float qu=face.y,qv=face.z;
+   float du=cap*(derivative*qu*tilt+profile*.12f)/ax,dv=cap*(derivative*qv*tilt+profile*.07f)/az;
+   float h=cap*profile*tilt;
+   if(h>height){height=h;gradientX=du*co+dv*si;gradientZ=-du*si+dv*co;tone=seed;}
+  }
+  // Approximate projected contact shadows using the refracted mean sun ray.
+  float sx=dx+shadowX*cap,sz=dz+shadowZ*cap,tx=sx*co-sz*si,tz=sx*si+sz*co;
+  float sq=tx*tx*invX+tz*tz*invZ;
+  shadow=fmaxf(shadow,clamp01((1.12f-sq)*4)*fade);
+ }
+ return make_float4(height,gradientX,gradientZ,tone>=0?tone+1:-shadow);
+}
+__device__ float bottom_pc(float x,float z,float depth,float footprint){
+ return bottom(x,z,depth)+sand_relief(x,z,footprint).x+stone_relief(x,z,footprint).x;
+}
+__device__ float3 seabed_pc(float x,float z,float footprint,float4 sand,float4 stone,float3 sun,float3 view){
+ float broad=materialNoise(x*.42f,z*.42f),mid=materialNoise(x*3.1f+17,z*3.1f),fine=1/(1+footprint*footprint*80000);
+ float grain=fine>.03f?materialNoise(x*170,z*170)*fine:0;
+ float3 color=scale(blend(vec(.34f,.265f,.16f),vec(.56f,.465f,.31f),broad),.83f+.17f*mid+.055f*grain);
+ float coverage=stone.w>=1?clamp01(stone.x/fmaxf(.00025f,footprint*.11f)):0;
+ if(coverage>0){
+  float tone=stone.w-1;
+  float3 rock=blend(vec(.20f,.175f,.135f),vec(.40f,.31f,.205f),tone);
+  float speckle=materialNoise(x*110+7,z*110-13);
+  float flecks=1/(1+footprint*footprint*180000);
+  float mineral=flecks>.03f?materialNoise(x*380-11,z*380+29)*flecks:0;
+  rock=scale(rock,.76f+.3f*speckle+.07f*mineral);color=blend(color,rock,coverage);
+ }
+ float macroX=.019f*cosf(x*.19f)*sinf(z*.23f)+.0252f*cosf(x*.63f+z*.31f);
+ float macroZ=.023f*sinf(x*.19f)*cosf(z*.23f)+.0124f*cosf(x*.63f+z*.31f);
+ float3 normal=unit(vec(-macroX-sand.y-stone.y,1,-macroZ-sand.z-stone.z));
+ float shade=.26f+.84f*fmaxf(0,dotv(normal,sun));
+ if(stone.w<0)shade*=1+.35f*stone.w;
+ color=scale(color,shade);
+ // Rough submerged mineral highlights follow the cap normal.
+ float highlight=fmaxf(0,dotv(normal,unit(minus(sun,view))));
+ float h2=highlight*highlight,h4=h2*h2,h8=h4*h4,h16=h8*h8;
+ return plus(color,scale(vec(1,.94f,.81f),h16*h16*.003f*coverage));
+}
+// Diagnostics only: verify material slopes against independent finite steps
+// through the actual bed relief, including sparse stone patches.
+__global__ void bed_quality_probe(float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
+ float x=((float)(i%64)-32)*.0913f,z=((float)(i/64)-32)*.0971f,e=.0001f;
+ float4 sand=sand_relief(x,z,.001f),stone=stone_relief(x,z,.001f);
+ float sx=(sand_relief(x+e,z,.001f).x-sand_relief(x-e,z,.001f).x)/(2*e),sz=(sand_relief(x,z+e,.001f).x-sand_relief(x,z-e,.001f).x)/(2*e);
+ float4 a=stone_relief(x+e,z,.001f),b=stone_relief(x-e,z,.001f),c=stone_relief(x,z+e,.001f),d=stone_relief(x,z-e,.001f);
+ output[i*3]=sand;output[i*3+1]=stone;
+ output[i*3+2]=make_float4(sx,sz,(a.x-b.x)/(2*e),(c.x-d.x)/(2*e));
+}
 // Forward sunlight transport. Bilinear photon splats accumulate all ray
 // branches at folds; fixed-point atomics preserve energy on WebGPU.
 __global__ void caustic_clear(unsigned *photons,int dispersion,int lightSize){
@@ -419,6 +518,45 @@ __device__ float3 shade_pixel(const float4 *surface,const float4 *coefficients,c
  float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
  return col;
 }
+__device__ float3 shade_pixel_pc(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
+ int smooth=lightSize>256?1:0;
+ float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
+ float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
+ float3 r=vec(right.x,right.y,right.z),u=vec(up.x,up.y,up.z);
+ float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
+ if(ray.y<-.0005f){
+ float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
+ float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
+ w=smooth!=0?wave_pc(coefficients,p.x,p.z,causticDetail,pressureActive,1):wave(surface,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ float grazing=1-clamp01(nv),grazing2=grazing*grazing;
+ float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
+ float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));
+ float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
+ float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
+ for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ travel=fmaxf(0,travel);float3 bed=vec(0,0,0);
+ if(smooth!=0){float4 sand=sand_relief(bx,bz,pixelFootprint),stone=stone_relief(bx,bz,pixelFootprint);float3 bedSun=scale(refractv(scale(sunDir(),-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
+ else bed=seabed(bx,bz,pixelFootprint);
+ float3 ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
+ // Light travels down through the water before returning along the view ray.
+ float opticalDistance=travel+forward.w;
+ ca=blend(vec(1,1,1),ca,causticDetail*right.w);
+ float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
+ float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
+ col=blend(through,reflected,fresnel);
+ float3 halfv=unit(minus(sunDir(),ray));
+ float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
+ float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
+ col=plus(col,scale(vec(1,.89f,.68f),spec));
+ float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
+ if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
+ }else{col=sky(ray);}
+ float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
+ return col;
+}
 __device__ unsigned pack_color(float3 col){
  unsigned rr=(unsigned)(positive_power(film(col.x),.454545f)*255),gg=(unsigned)(positive_power(film(col.y),.454545f)*255),bb=(unsigned)(positive_power(film(col.z),.454545f)*255);
  return rr|(gg<<8)|(bb<<16)|4278190080u;
@@ -435,8 +573,16 @@ __global__ void render_pc(const float4 *surface,const float4 *coefficients,const
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float3 col=vec(0,0,0);
  for(int j=0;j<2;j++)for(int i=0;i<2;i++){
-  float3 sample=shade_pixel(surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
+  float3 sample=shade_pixel_pc(surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
   col=plus(col,sample);
  }
  image[y*width+x]=pack_color(scale(col,.25f));
+}
+
+// Diagnostic PC single sampling retains the same materials and relief as PC
+// multisampling. Mobile's entry never depends on these material functions.
+__global__ void render_pc_single(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
+ float3 col=shade_pixel_pc(surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
+ image[y*width+x]=pack_color(col);
 }

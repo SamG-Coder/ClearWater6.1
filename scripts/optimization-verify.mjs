@@ -1,13 +1,21 @@
 import {chromium,devices} from 'playwright';
 import {execFileSync} from 'node:child_process';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
 // Reference only our own last published source, never other water examples.
-const referenceCommit=process.env.WATER_REFERENCE_COMMIT||'d1d6906',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'}).replace('window.waterLab={','window.waterLab={'+"\n async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},");
+const referenceCommit=process.env.WATER_REFERENCE_COMMIT||'6860d41',oldSource=execFileSync('git',['show',`${referenceCommit}:src/water.cu`],{encoding:'utf8'}),oldHost=execFileSync('git',['show',`${referenceCommit}:app.js`],{encoding:'utf8'}).replace('window.waterLab={','window.waterLab={'+"\n async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},");
 const oldHtml=execFileSync('git',['show',`${referenceCommit}:index.html`],{encoding:'utf8'});
 const oldBuild=execFileSync('git',['show',`${referenceCommit}:scripts/build.mjs`],{encoding:'utf8'});
 const artifacts=new Map();for(const m of oldSource.matchAll(/__global__ void (\w+)/g)){const name=m[1];artifacts.set(name,JSON.stringify(serializableArtifact(compile(oldSource,{entry:name,workgroupSize:['render','render_pc'].includes(name)&&(oldBuild.includes("name==='render'?[32,2,1]")||oldBuild.includes("['render','render_pc'].includes(name)?[32,2,1]"))?[32,2,1]:name==='fft_local'?[64,1,1]:['camera_step','brush_pick'].includes(name)?[1,1,1]:[8,8,1]}))));}
+// Generated temporary identifiers and blank lines can change when unrelated
+// CUDA helpers are added. Compare all remaining shader text to the release.
+let lightweightShaderEquivalent=null;
+if(referenceCommit==='6860d41'){
+ const normalize=source=>{const ids=new Map();return source.replace(/\bcw_tmp_\d+\b/g,key=>{if(!ids.has(key))ids.set(key,'temporary'+ids.size);return ids.get(key);}).replace(/\s+/g,' ').trim();};
+ const current=JSON.parse(await readFile('kernels/render.json','utf8')),previous=JSON.parse(artifacts.get('render'));
+ lightweightShaderEquivalent=normalize(current.wgsl)===normalize(previous.wgsl);assert.ok(lightweightShaderEquivalent,'PC material changes must not alter the lightweight shader operations');
+}
 const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']}),base=process.env.WATER_URL||'http://127.0.0.1:5191/';
 const cases=[['shallows',4,1.4,5,false],['late',12,1.4,5,false],['deep',7,8,5,false],['highWindShallow',7,.5,14,false],['lowWindDeep',7,12,2,false],['down',4,1.4,5,true],['sun',4,1.4,5,'sun']],reference=[];let before,after;
 await mkdir('captures',{recursive:true});
@@ -40,5 +48,5 @@ try{
  // The displayed FPS must measure wall time, even when simulation dt is capped.
  const slow=await browser.newPage({...devices['Pixel 7']});await slow.addInitScript(()=>{const raf=window.requestAnimationFrame.bind(window);window.requestAnimationFrame=callback=>raf(()=>setTimeout(()=>callback(performance.now()),160));});
  await slow.goto(base+'?t=4');await slow.waitForFunction(()=>waterDiagnostics.frames>=3,null,{timeout:120000});const fps=await slow.evaluate(()=>waterDiagnostics.fps);assert.ok(fps>0&&fps<10);await slow.close();
- const result={referenceCommit,profile:process.env.WATER_DESKTOP==='1'?'desktop RGB':'mobile monochrome',environment:'Desktop Chromium/Edge with NVIDIA GPU; viewport emulation is not physical phone hardware',before,after,speedup:before.medianMs&&after.medianMs?before.medianMs/after.medianMs:null,frames:reference.map(({rgba,...rest})=>rest),slowFrameFps:fps};await writeFile('captures/optimization-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
+ const result={referenceCommit,lightweightShaderEquivalent,profile:process.env.WATER_DESKTOP==='1'?'desktop RGB':'mobile monochrome',environment:'Desktop Chromium/Edge with NVIDIA GPU; viewport emulation is not physical phone hardware',before,after,speedup:before.medianMs&&after.medianMs?before.medianMs/after.medianMs:null,frames:reference.map(({rgba,...rest})=>rest),slowFrameFps:fps};await writeFile('captures/optimization-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}
