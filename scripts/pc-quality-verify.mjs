@@ -11,6 +11,9 @@ try{
  await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length);
  assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
  assert.equal(await page.evaluate(()=>waterDiagnostics.pixelSamples),4);
+ const reconstruction=await page.evaluate(()=>waterLab.interpolationTest());
+ assert.ok(reconstruction.finite);assert.ok(reconstruction.cubic.height<reconstruction.bilinear.height*.3);assert.ok(reconstruction.cubic.slope<reconstruction.bilinear.slope*.6);
+ const flat=await page.evaluate(()=>waterLab.flatCausticsTest());assert.ok(flat.maxDeviationFromUniform<.001);
  const frames=[],timings=[];
  for(const samples of [1,4]){
   await page.evaluate(count=>waterLab.setPixelSamples(count),samples);
@@ -28,13 +31,14 @@ try{
  assert.ok(changed>0,'Spatial samples must affect the image');
  assert.ok(total/a.rgba.length<8,'Supersampling must retain the overall scene appearance');
  assert.ok(timings.every(t=>t.medianMs>0&&Number.isFinite(t.medianMs)));
- const resolutions=[];
+ const resolutions=[];let stress;
  for(const [quality,width,height] of [['2560',2560,1440],['3840',3840,2160]]){
   await page.setViewportSize({width,height});
   await page.locator('#quality').evaluate((e,value)=>{e.value=value;e.dispatchEvent(new Event('change'));},quality);
   await page.evaluate(()=>waterLab.seek(4));
   const layout=await page.evaluate(()=>({width:waterDiagnostics.width,height:waterDiagnostics.height,samples:waterDiagnostics.pixelSamples,canvasWidth:document.querySelector('canvas').width,canvasHeight:document.querySelector('canvas').height}));
   assert.deepEqual(layout,{width,height,samples:4,canvasWidth:width,canvasHeight:height});
+  assert.equal(await page.evaluate(()=>waterDiagnostics.lightMapSize),512);assert.equal(await page.evaluate(()=>waterDiagnostics.photonRays),1024);
   const gpu=await page.evaluate(()=>waterLab.benchmark(120));
   const completion=await page.evaluate(()=>new Promise((resolve,reject)=>{
    const times=[],fps=[];let lastFrame=waterDiagnostics.frames;
@@ -50,6 +54,17 @@ try{
   const state=await page.evaluate(()=>waterLab.inspect());assert.ok(state.finite);
   await page.screenshot({path:`captures/pc-quality-${width}x${height}.png`});
   resolutions.push({width,height,pixelSamples:4,gpu,completion});
+  if(width===3840){
+   await page.screenshot({path:'captures/pc-quality-grid-closeup.png',clip:{x:1400,y:1250,width:900,height:700}});
+   for(const [id,value] of [['depth',.5],['wind',14],['energy',2.5]])await page.locator('#'+id).evaluate((e,v)=>{e.value=v;e.dispatchEvent(new Event('input'));},value);
+   await page.evaluate(()=>{waterLab.resume();});await page.evaluate(()=>waterLab.lookDown());
+   await page.mouse.move(1700,1300);await page.mouse.down();
+   for(let i=0;i<12;i++){await page.mouse.move(1700+i*35,1300+i*20);await page.waitForTimeout(20);}
+   await page.mouse.up();await page.evaluate(()=>waterLab.seek(7));
+   const state=await page.evaluate(()=>waterLab.inspect());assert.ok(state.finite&&state.forceEnergy>0);assert.equal(await page.evaluate(()=>waterDiagnostics.activeCascades),3);
+   const timing=await page.evaluate(()=>waterLab.benchmark(120));stress={width,height,depth:.5,wind:14,energy:2.5,downwardCamera:true,pressureActive:true,timing};
+   await page.screenshot({path:'captures/pc-quality-4k-stress.png'});
+  }
  }
  await page.evaluate(()=>waterLab.setPixelSamples(0));
  await page.locator('#quality').evaluate(e=>{e.value='768';e.dispatchEvent(new Event('change'));});
@@ -59,6 +74,6 @@ try{
  await page.evaluate(()=>waterLab.seek(4));await page.evaluate(()=>waterLab.setPixelSamples(4));
  assert.equal(await page.evaluate(()=>waterDiagnostics.pixelSamples),1,'Mobile must keep one sample even with a PC override');
  assert.deepEqual(errors,[]);assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
- const result={environment:'Desktop NVIDIA/Edge; not a benchmark for every PC or phone',width:a.width,height:a.height,linearRadianceAveraging:true,meanChannelDifference:total/a.rgba.length,changedChannels:changed,simulationUnchanged:true,mobileSingleSample:true,timings,resolutions,errors};
+ const result={environment:'Desktop NVIDIA/Edge; not a benchmark for every PC or phone',reconstruction,flat,width:a.width,height:a.height,linearRadianceAveraging:true,meanChannelDifference:total/a.rgba.length,changedChannels:changed,simulationUnchanged:true,mobileSingleSample:true,timings,resolutions,stress,errors};
  await writeFile('captures/pc-quality-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}

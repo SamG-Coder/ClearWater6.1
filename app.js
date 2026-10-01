@@ -4,9 +4,11 @@ const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
 if(touchDevice){document.body.classList.add('touch','clean');$('quality').value='mobile';$('toggle').textContent='Settings';$('fly').textContent='Push water';$('touchMode').textContent='Mode: Look';}
 let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=touchDevice,lastWind=-1,lastDepth=-1,disturbanceActive=false,pcSampleOverride=0;
+const pcQuality=()=>$('quality').value!=='mobile'&&($('quality').value!=='768'||pcSampleOverride===4);
+const mapSize=()=>pcQuality()?512:256;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
-let runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
+let coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
 const fixed=new URLSearchParams(location.search).get('t');if(fixed!==null){time=Number(fixed);playing=false;}
 $('pause').textContent=playing?'Pause':'Resume';
@@ -72,18 +74,21 @@ addEventListener('resize',resetSticks);
 canvas.addEventListener('wheel',e=>{e.preventDefault();speed=Math.min(100,Math.max(.2,speed*Math.exp(-e.deltaY*.001)));},{passive:false});
 function resize(){
  const mobile=mobileProfile(),aspect=innerWidth/innerHeight;
- const lightChannels=mobile?1:3;
- if(diagnostics.lightChannels!==lightChannels){
+ const lightChannels=mobile?1:3,lightSize=mapSize(),texels=lightSize*lightSize;
+ if(diagnostics.lightChannels!==lightChannels||diagnostics.lightMapSize!==lightSize){
   runtime.destroyBuffer(light);runtime.destroyBuffer(monoLight);runtime.destroyBuffer(photons);
-  light=runtime.createBuffer(mobile?16:65536*16);monoLight=runtime.createBuffer(mobile?65536*4:4);photons=runtime.createBuffer(mobile?65536*4:65536*16);
-  diagnostics.lightChannels=lightChannels;diagnostics.lightStorageBytes=mobile?65536*4+16:65536*16+4;diagnostics.photonStorageBytes=mobile?65536*4:65536*16;
+  if(coefficients){for(const buffer of coefficients)runtime.destroyBuffer(buffer);coefficients=null;}
+  if(pcQuality())coefficients=[runtime.createBuffer(49152*16),runtime.createBuffer(49152*16)];
+  kernels.surface_coefficients.clear();
+  light=runtime.createBuffer(mobile?16:texels*16);monoLight=runtime.createBuffer(mobile?texels*4:4);photons=runtime.createBuffer(mobile?texels*4:texels*16);
+  diagnostics.lightMapSize=lightSize;diagnostics.smoothSurface=pcQuality();diagnostics.lightChannels=lightChannels;diagnostics.lightStorageBytes=mobile?texels*4+16:texels*16+4;diagnostics.photonStorageBytes=mobile?texels*4:texels*16;
   kernels.caustic_clear.clear();kernels.caustic_map.clear();kernels.caustic_resolve.clear();kernels.render.clear();kernels.render_pc.clear();
  }
 
  const longest=mobile?960*adaptiveScale:Infinity;
  const desiredWidth=mobile?Math.min(innerWidth*devicePixelRatio,longest*Math.min(1,aspect)):Math.min(Number($('quality').value),innerWidth*devicePixelRatio);
  const w=Math.max(64,Math.floor(desiredWidth/64)*64),h=Math.max(8,Math.round(w/aspect/8)*8);
- diagnostics.mobile=mobile;diagnostics.targetFps=mobile?30:60;diagnostics.adaptiveScale=adaptiveScale;diagnostics.photonRays=mobile?256:512;
+ diagnostics.mobile=mobile;diagnostics.targetFps=mobile?30:60;diagnostics.adaptiveScale=adaptiveScale;diagnostics.photonRays=mobile?256:(pcQuality()?1024:512);
  if(w===width&&h===height)return;
  if(image)runtime.destroyBuffer(image);width=w;height=h;canvas.width=w;canvas.height=h;image=runtime.createBuffer(w*h*4);
  context.configure({device:runtime.device,format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT,alphaMode:'opaque'});
@@ -92,7 +97,7 @@ function resize(){
 function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars);}
 function compute(dt,timestampWrites){
  const b=runtime.batch({timestampWrites});
- const depth=Number($('depth').value),wind=Number($('wind').value),energy=Number($('energy').value),exposure=Number($('exposure').value),view=Number($('view').value),rays=mobileProfile()?256:512,dispersion=mobileProfile()?0:1;
+ const depth=Number($('depth').value),wind=Number($('wind').value),energy=Number($('energy').value),exposure=Number($('exposure').value),view=Number($('view').value),rays=mobileProfile()?256:(pcQuality()?1024:512),dispersion=mobileProfile()?0:1,lightSize=mapSize();
  const samples=mobileProfile()?1:(pcSampleOverride||($('quality').value==='768'?1:4));diagnostics.pixelSamples=samples;
  if(held&&forceMoved)disturbanceActive=true;
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
@@ -105,10 +110,11 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('spectrum',{output:fft[0],seed,disturbance,motion},{time,energy}),[16,16,cascades]);
  for(let axis=0;axis<2;axis++)b.dispatch(bind('fft_local',{input:fft[axis],output:fft[1-axis],twiddles},{axis}),[128,1,cascades]);
  b.dispatch(bind('resolve',{input:fft[0],surface}),[16,16,cascades]);
- b.dispatch(bind('caustic_clear',{photons},{dispersion}),[32,32,1]);
- b.dispatch(bind('caustic_map',{surface,photons},{depth,rays,dispersion}),[rays/8,rays/8,1]);
- b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/256)**2,dispersion}),[32,32,1]);
- b.dispatch(bind(samples===4?'render_pc':'render',{surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion}),[width/32,height/2,1]);
+ if(pcQuality())for(let axis=0;axis<2;axis++)b.dispatch(bind('surface_coefficients',{input:axis===0?surface:coefficients[0],output:coefficients[axis]},{axis}),[16,16,cascades]);
+ b.dispatch(bind('caustic_clear',{photons},{dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
+ b.dispatch(bind('caustic_map',{surface:pcQuality()?coefficients[1]:surface,photons},{depth,rays,dispersion,lightSize}),[rays/8,rays/8,1]);
+ b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/lightSize)**2,dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
+ b.dispatch(bind(samples===4?'render_pc':'render',{surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
 async function frame(now){
@@ -128,13 +134,26 @@ async function frame(now){
 }
 async function exclusive(fn){busy=true;try{await runtime.idle();return await fn();}finally{busy=false;}}
 window.waterLab={
- async setPixelSamples(count){if(count!==0&&count!==1&&count!==4)throw Error('Pixel samples must be 0 (automatic), 1 or 4');return exclusive(async()=>{pcSampleOverride=count;compute(0);await runtime.idle();});},
+ async setPixelSamples(count){if(count!==0&&count!==1&&count!==4)throw Error('Pixel samples must be 0 (automatic), 1 or 4');return exclusive(async()=>{pcSampleOverride=count;resize();compute(0);await runtime.idle();});},
  async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},
  async lookDown(){return exclusive(async()=>{const update=new Float32Array([0,-.95,0,0]);runtime.device.queue.writeBuffer(camera.gpuBuffer,16,update);compute(0);await runtime.idle();});},
  pause(){playing=false;},resume(){playing=true;},
- async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const rawLight=await runtime.read(mobileProfile()?monoLight:light),l=mobileProfile()?Float32Array.from({length:65536*4},(_,i)=>i%4===3?1:rawLight[Math.floor(i/4)]):rawLight,d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];for(let i=0;i<l.length;i+=4)for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/65536;return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin:Math.min(...l.filter((v,i)=>i%4===0)),causticMax:Math.max(...l.filter((v,i)=>i%4===0)),adapter:runtime.describe()};});},
+ async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const rawLight=await runtime.read(mobileProfile()?monoLight:light),l=mobileProfile()?Float32Array.from({length:65536*4},(_,i)=>i%4===3?1:rawLight[Math.floor(i/4)]):rawLight,d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];let causticMin=Infinity,causticMax=-Infinity;for(let i=0;i<l.length;i+=4){causticMin=Math.min(causticMin,l[i]);causticMax=Math.max(causticMax,l[i]);for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/(l.length/4);}return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin,causticMax,adapter:runtime.describe()};});},
  async seek(t){return exclusive(async()=>{playing=false;time=t;resize();compute(0);await runtime.idle();});},
  async screenshot(){return exclusive(async()=>{const p=await runtime.read(image,Uint32Array);return {width,height,rgba:Array.from(new Uint8Array(p.buffer))};});},
+ async interpolationTest(){return exclusive(async()=>{
+  // Independent analytic Fourier surface; never used for live simulation.
+  const modes=[{x:13,z:7,a:.08},{x:5,z:-9,a:.04}],field=new Float32Array(49152*4),points=new Float32Array(64*4);
+  const oracle=(x,z)=>{let h=0,dx=0,dz=0;for(const m of modes){const kx=2*Math.PI*m.x/6,kz=2*Math.PI*m.z/6,p=kx*x+kz*z;h+=m.a*Math.cos(p);dx-=m.a*kx*Math.sin(p);dz-=m.a*kz*Math.sin(p);}return [h,dx,dz];};
+  for(let z=0;z<128;z++)for(let x=0;x<128;x++){const wx=x*6/128,wz=z*6/128,d=6/128,p=oracle(wx,wz),i=(z*128+x)*4;p[1]=(oracle(wx+d,wz)[0]-oracle(wx-d,wz)[0])/(2*d);p[2]=(oracle(wx,wz+d)[0]-oracle(wx,wz-d)[0])/(2*d);field.set(p,i);}
+  for(let i=0;i<64;i++){points[i*4]=Math.fround((i*1.713-.8)*6/128);points[i*4+1]=Math.fround((i*.937+127.4)*6/128);}
+  const input=runtime.createBuffer(field),positions=runtime.createBuffer(points),output=runtime.createBuffer(64*2*16),temporary=runtime.createBuffer(field.byteLength),filtered=runtime.createBuffer(field.byteLength);
+  try{runtime.batch().dispatch(bind('surface_coefficients',{input,output:temporary},{axis:0}),[16,16,1]).dispatch(bind('surface_coefficients',{input:temporary,output:filtered},{axis:1}),[16,16,1]).dispatch(bind('sample_quality_probe',{surface:input,coefficients:filtered,points:positions,output},{count:64}),[1,1,1]).submit();const values=await runtime.read(output),errors=[{height:0,slope:0},{height:0,slope:0}];
+   for(let i=0;i<64;i++){const ref=oracle(points[i*4],points[i*4+1]);for(let q=0;q<2;q++){const offset=(i*2+q)*4;errors[q].height+=(values[offset]-ref[0])**2;errors[q].slope+=(values[offset+1]-ref[1])**2+(values[offset+2]-ref[2])**2;}}
+   for(const e of errors){e.height=Math.sqrt(e.height/64);e.slope=Math.sqrt(e.slope/128);}
+   return {bilinear:errors[0],cubic:errors[1],finite:values.every(Number.isFinite),points:64,oracle:'Independent analytic Fourier height and derivatives, including periodic boundaries'};
+  }finally{runtime.destroyBuffer(input);runtime.destroyBuffer(positions);runtime.destroyBuffer(output);runtime.destroyBuffer(temporary);runtime.destroyBuffer(filtered);kernels.sample_quality_probe.clear();kernels.surface_coefficients.clear();}
+ });},
  async fftTest(strategy='shared'){return exclusive(async()=>{
   const data=new Float32Array(49152*2),modes=[{x:3,z:7,c:0,re:.3,im:-.2},{x:51,z:89,c:0,re:.07,im:.11},{x:11,z:125,c:1,re:-.4,im:.15},{x:37,z:11,c:2,re:.03,im:-.02}];
   const reverse=x=>{let r=0;for(let i=0;i<7;i++){r=r*2+(x&1);x>>=1;}return r;};
@@ -148,8 +167,8 @@ window.waterLab={
   runtime.destroyBuffer(a);runtime.destroyBuffer(b);kernels.fft_stage.clear();kernels.fft_local.clear();return {maxError,strategy,modes:modes.length,axes:2,cascades:3,oracle:'Direct complex Fourier series evaluated independently in JavaScript for diagnostics only'};
  });},
  async flatCausticsTest(mobile=false){return exclusive(async()=>{
-  const rays=mobile?256:512,dispersion=mobile?0:1,normalization=mobile?4096:16384;
-  const flat=runtime.createBuffer(49152*16),out=runtime.createBuffer(65536*16),outMono=runtime.createBuffer(65536*4),testPhotons=runtime.createBuffer(mobile?65536*4:65536*16);runtime.batch().dispatch(bind('caustic_clear',{photons:testPhotons},{dispersion}),[32,32,1]).dispatch(bind('caustic_map',{surface:flat,photons:testPhotons},{depth:1.4,rays,dispersion}),[rays/8,rays/8,1]).dispatch(bind('caustic_resolve',{photons:testPhotons,light:out,monoLight:outMono},{normalization,dispersion}),[32,32,1]).submit();
+  const lightSize=mobile?256:mapSize(),texels=lightSize*lightSize,rays=mobile?256:(lightSize===512?1024:512),dispersion=mobile?0:1,normalization=4096*(rays/lightSize)**2;
+  const flat=runtime.createBuffer(49152*16),out=runtime.createBuffer(texels*16),outMono=runtime.createBuffer(texels*4),testPhotons=runtime.createBuffer(mobile?texels*4:texels*16);runtime.batch().dispatch(bind('caustic_clear',{photons:testPhotons},{dispersion,lightSize}),[lightSize/8,lightSize/8,1]).dispatch(bind('caustic_map',{surface:flat,photons:testPhotons},{depth:1.4,rays,dispersion,lightSize}),[rays/8,rays/8,1]).dispatch(bind('caustic_resolve',{photons:testPhotons,light:out,monoLight:outMono},{normalization,dispersion,lightSize}),[lightSize/8,lightSize/8,1]).submit();
   const a=await runtime.read(mobile?outMono:out);let error=0;for(let i=0;i<a.length;i++)if(mobile||i%4!==3)error=Math.max(error,Math.abs(a[i]-1));runtime.destroyBuffer(flat);runtime.destroyBuffer(out);runtime.destroyBuffer(outMono);runtime.destroyBuffer(testPhotons);kernels.caustic_clear.clear();kernels.caustic_map.clear();kernels.caustic_resolve.clear();return {maxDeviationFromUniform:error};
  });},
  async benchmark(samples=40){return exclusive(async()=>{if(!runtime.device.features.has('timestamp-query'))return {unsupported:true};playing=false;const qs=runtime.device.createQuerySet({type:'timestamp',count:2}),resolve=runtime.device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),read=runtime.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const times=[];try{for(let i=0;i<samples+8;i++){compute(0,{querySet:qs,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1});const enc=runtime.device.createCommandEncoder();enc.resolveQuerySet(qs,0,2,resolve,0);enc.copyBufferToBuffer(resolve,0,read,0,16);runtime.device.queue.submit([enc.finish()]);await read.mapAsync(GPUMapMode.READ);const t=new BigUint64Array(read.getMappedRange());if(i>=8)times.push(Number(t[1]-t[0])/1e6);read.unmap();}times.sort((a,b)=>a-b);return {width,height,samples,medianMs:times[Math.floor(samples/2)],p95Ms:times[Math.floor(samples*.95)],scope:'GPU camera, spectrum, FFT, normals, caustics and render; excludes texture copy and browser presentation',adapter:runtime.describe()};}finally{qs.destroy();resolve.destroy();read.destroy();}});}
@@ -157,9 +176,9 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','sample_quality_probe','surface_coefficients'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','sample_quality_probe','surface_coefficients']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }

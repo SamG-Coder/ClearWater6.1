@@ -52,8 +52,9 @@ try{
   await page.locator('#quality').evaluate((e,value)=>{e.value=value;e.dispatchEvent(new Event('change'));},profile);
   await page.evaluate(()=>waterLab.seek(4));const state=await page.evaluate(()=>waterLab.inspect()),layout=await page.evaluate(()=>waterDiagnostics);
   assert.ok(state.finite);assert.equal(layout.pixelSamples,profile==='1152'?4:1);assert.equal(layout.lightChannels,profile==='mobile'?1:3);
-  assert.equal(layout.lightStorageBytes,profile==='mobile'?65536*4+16:65536*16+4);
-  assert.equal(layout.photonStorageBytes,profile==='mobile'?65536*4:65536*16);
+  const texels=profile==='1152'?512*512:256*256;assert.equal(layout.lightMapSize,profile==='1152'?512:256);
+  assert.equal(layout.lightStorageBytes,profile==='mobile'?texels*4+16:texels*16+4);
+  assert.equal(layout.photonStorageBytes,profile==='mobile'?texels*4:texels*16);
   for(const mean of state.causticMean)assert.ok(Math.abs(mean-1)<.01);
  }
  assert.deepEqual(errors,[]);
