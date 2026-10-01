@@ -22,9 +22,27 @@ try{
  assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
  assert.equal(await page.evaluate(()=>waterDiagnostics.pixelSamples),4);
  const bed=await page.evaluate(()=>waterLab.bedTest());assert.ok(bed.finite&&bed.stonePoints>0&&bed.maxStoneHeight>.006);assert.ok(bed.sandSlopeError<.01);assert.ok(bed.stoneSlopeError<.02);
+ const sandTransport=await page.evaluate(()=>waterLab.sandTest());
+ assert.ok(Object.values(sandTransport).every(s=>s.finite));
+ assert.ok(sandTransport.shallow.rms>.0001,'Actual FFT waves must reshape shallow sand');
+ assert.equal(sandTransport.flat.max,0,'Flat water must not create sediment motion');
+ assert.equal(sandTransport.deep.max,0,'Deep water must leave sand unchanged');
+ assert.equal(sandTransport.paused.max,0,'Zero timestep must preserve sand');
  const reconstruction=await page.evaluate(()=>waterLab.interpolationTest());
  assert.ok(reconstruction.finite);assert.ok(reconstruction.cubic.height<reconstruction.bilinear.height*.3);assert.ok(reconstruction.cubic.slope<reconstruction.bilinear.slope*.6);
  const flat=await page.evaluate(()=>waterLab.flatCausticsTest());assert.ok(flat.maxDeviationFromUniform<.001);
+ // Freeze identical water/camera states before and after live sediment evolution.
+ await page.locator('#depth').evaluate(e=>{e.value='.5';e.dispatchEvent(new Event('input'));});
+ await page.evaluate(()=>waterLab.lookDown());await page.evaluate(()=>waterLab.seek(4));
+ const beforeSand=await page.evaluate(()=>waterLab.screenshot());
+ await page.screenshot({path:'captures/sand-fft-before.png'});
+ await page.evaluate(()=>waterLab.resume());await page.waitForTimeout(4000);await page.evaluate(()=>waterLab.seek(4));
+ const afterSand=await page.evaluate(()=>waterLab.screenshot());let sedimentChannels=0;
+ for(let i=0;i<beforeSand.rgba.length;i++)if(beforeSand.rgba[i]!==afterSand.rgba[i])sedimentChannels++;
+ assert.ok(sedimentChannels>100,'Sand must visibly evolve with water frozen at the identical instant');
+ await page.screenshot({path:'captures/sand-fft-after.png'});
+ await page.locator('#depth').evaluate(e=>{e.value='1.4';e.dispatchEvent(new Event('input'));});
+ await page.evaluate(()=>waterLab.lookAt(0,-.32));await page.evaluate(()=>waterLab.seek(4));
  const frames=[],timings=[];
  for(const samples of [1,4]){
   await page.evaluate(count=>waterLab.setPixelSamples(count),samples);
@@ -77,6 +95,6 @@ try{
  await page.evaluate(()=>waterLab.seek(4));await page.evaluate(()=>waterLab.setPixelSamples(4));
  assert.equal(await page.evaluate(()=>waterDiagnostics.pixelSamples),1,'Mobile must keep one sample even with a PC override');
  assert.deepEqual(errors,[]);assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
- const result={environment:'Desktop NVIDIA/Edge; not a benchmark for every PC or phone',bed,reconstruction,flat,width:a.width,height:a.height,linearRadianceAveraging:true,meanChannelDifference:total/a.rgba.length,changedChannels:changed,simulationUnchanged:true,mobileSingleSample:true,timings,resolutions,stress,errors};
+ const result={sandTransport,sedimentChannels,environment:'Desktop NVIDIA/Edge; not a benchmark for every PC or phone',bed,reconstruction,flat,width:a.width,height:a.height,linearRadianceAveraging:true,meanChannelDifference:total/a.rgba.length,changedChannels:changed,simulationUnchanged:true,mobileSingleSample:true,timings,resolutions,stress,errors};
  await writeFile('captures/pc-quality-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}

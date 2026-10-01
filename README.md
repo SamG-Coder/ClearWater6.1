@@ -110,3 +110,10 @@ The first domed gravel trial looked like raised beads and was rejected visually.
 The PC material shader is separate from the retained Mobile/Performance shading function. An explicit PC single-sample diagnostic entry shares the upgraded material code with PC multisampling, so sampling comparisons evaluate the same optics. No PC relief calculations enter the lightweight shader dependency graph.
 
 The optimization verifier also checks that the lightweight render shader matches release `6860d41` after normalizing generated temporary names and whitespace. Local NVIDIA/Edge measurements for this material pass were approximately 4.1 ms at 1440p and 8.4 ms at 4K GPU compute. The heavy 4K test was around 12 ms GPU compute and 13-14 ms frame completion, so further PC quality increases should follow another optimization pass. These are local measurements, not a physical-phone or universal PC guarantee.
+
+
+## FFT-driven shallow sand
+
+PC quality profiles retain a small 128 by 128 sediment phase field on the GPU (256 KiB). A CUDA transport pass integrates the resolved long-wave FFT, depth-attenuated short waves and interactive pressure waves. Its response fades smoothly with depth and stops at 3 metres. Integration uses elapsed time, pauses with the simulation, and keeps its state between frames. Continuous-curvature sampling warps the sand ridges; the same deformation enters bed intersections and analytic lighting normals. Gravel remains anchored.
+
+This is a visual sediment transport approximation, not a sediment mass conservation or full coastal morphology solver. Mobile and Performance retain their existing shader and do not allocate the sediment field unless a PC quality profile is selected. No extra FFT is required. The PC verifier checks actual FFT forcing against flat-water, deep-water and zero-timestep controls, then compares sand before and after live evolution with water frozen at the same simulation instant.

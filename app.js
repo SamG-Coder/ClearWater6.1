@@ -8,7 +8,7 @@ const pcQuality=()=>$('quality').value!=='mobile'&&($('quality').value!=='768'||
 const mapSize=()=>pcQuality()?512:256;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
-let coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
+let sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
 const fixed=new URLSearchParams(location.search).get('t');if(fixed!==null){time=Number(fixed);playing=false;}
 $('pause').textContent=playing?'Pause':'Resume';
@@ -78,7 +78,7 @@ function resize(){
  if(diagnostics.lightChannels!==lightChannels||diagnostics.lightMapSize!==lightSize){
   runtime.destroyBuffer(light);runtime.destroyBuffer(monoLight);runtime.destroyBuffer(photons);
   if(coefficients){for(const buffer of coefficients)runtime.destroyBuffer(buffer);coefficients=null;}
-  if(pcQuality())coefficients=[runtime.createBuffer(49152*16),runtime.createBuffer(49152*16)];
+  if(pcQuality()){coefficients=[runtime.createBuffer(49152*16),runtime.createBuffer(49152*16)];if(!sandState)sandState=runtime.createBuffer(16384*16);}
   kernels.surface_coefficients.clear();
   light=runtime.createBuffer(mobile?16:texels*16);monoLight=runtime.createBuffer(mobile?texels*4:4);photons=runtime.createBuffer(mobile?texels*4:texels*16);
   diagnostics.lightMapSize=lightSize;diagnostics.smoothSurface=pcQuality();diagnostics.lightChannels=lightChannels;diagnostics.lightStorageBytes=mobile?texels*4+16:texels*16+4;diagnostics.photonStorageBytes=mobile?texels*4:texels*16;
@@ -110,11 +110,12 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('spectrum',{output:fft[0],seed,disturbance,motion},{time,energy}),[16,16,cascades]);
  for(let axis=0;axis<2;axis++)b.dispatch(bind('fft_local',{input:fft[axis],output:fft[1-axis],twiddles},{axis}),[128,1,cascades]);
  b.dispatch(bind('resolve',{input:fft[0],surface}),[16,16,cascades]);
+ if(pcQuality()&&depth<3&&playing&&dt>0)b.dispatch(bind('sand_transport',{surface,sandState},{dt,depth,pressureActive:disturbanceActive?1:0}),[16,16,1]);
  if(pcQuality())for(let axis=0;axis<2;axis++)b.dispatch(bind('surface_coefficients',{input:axis===0?surface:coefficients[0],output:coefficients[axis]},{axis}),[16,16,cascades]);
  b.dispatch(bind('caustic_clear',{photons},{dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
  b.dispatch(bind('caustic_map',{surface:pcQuality()?coefficients[1]:surface,photons},{depth,rays,dispersion,lightSize}),[rays/8,rays/8,1]);
  b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/lightSize)**2,dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
- b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
+ b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
 async function frame(now){
@@ -141,6 +142,16 @@ window.waterLab={
  async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const rawLight=await runtime.read(mobileProfile()?monoLight:light),l=mobileProfile()?Float32Array.from({length:65536*4},(_,i)=>i%4===3?1:rawLight[Math.floor(i/4)]):rawLight,d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];let causticMin=Infinity,causticMax=-Infinity;for(let i=0;i<l.length;i+=4){causticMin=Math.min(causticMin,l[i]);causticMax=Math.max(causticMax,l[i]);for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/(l.length/4);}return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin,causticMax,adapter:runtime.describe()};});},
  async seek(t){return exclusive(async()=>{playing=false;time=t;resize();compute(0);await runtime.idle();});},
  async screenshot(){return exclusive(async()=>{const p=await runtime.read(image,Uint32Array);return {width,height,rgba:Array.from(new Uint8Array(p.buffer))};});},
+ async sandTest(){return exclusive(async()=>{
+  const zero=runtime.createBuffer(49152*16),states=[0,1,2,3].map(()=>runtime.createBuffer(16384*16));
+  try{
+   for(let group=0;group<4;group++){const batch=runtime.batch();
+   for(let step=0;step<30;step++)for(let j=0;j<4;j++)batch.dispatch(bind('sand_transport',{surface:j===0?zero:surface,sandState:states[j]},{dt:j===3?0:1/30,depth:j===2?8:.5,pressureActive:disturbanceActive?1:0}),[16,16,1]);
+   batch.submit();}const results=[];
+   for(const state of states){const v=await runtime.read(state);let max=0,rms=0;for(let i=0;i<v.length;i+=4){max=Math.max(max,Math.abs(v[i]));rms+=v[i]*v[i];}results.push({finite:Array.from(v).every(Number.isFinite),max,rms:Math.sqrt(rms/16384)});}
+   return {flat:results[0],shallow:results[1],deep:results[2],paused:results[3]};
+  }finally{runtime.destroyBuffer(zero);for(const state of states)runtime.destroyBuffer(state);kernels.sand_transport.clear();}
+ });},
  async bedTest(){return exclusive(async()=>{
   const count=4096,out=runtime.createBuffer(count*3*16);
   try{runtime.batch().dispatch(bind('bed_quality_probe',{output:out},{count}),[count/64,1,1]).submit();const data=await runtime.read(out);let stonePoints=0,maxStoneHeight=0,sandSlopeError=0,stoneSlopeError=0;
@@ -183,9 +194,9 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }

@@ -174,6 +174,26 @@ __device__ float sample_height(const float4 *s,float x,float z,int c){
  float a=fract(u),b=fract(v);
  return mixf(mixf(s[base+wrap128(iz)*128+wrap128(ix)].x,s[base+wrap128(iz)*128+wrap128(ix+1)].x,a),mixf(s[base+wrap128(iz+1)*128+wrap128(ix)].x,s[base+wrap128(iz+1)*128+wrap128(ix+1)].x,a),b);
 }
+// Slow, bounded sediment transport proxy driven by the resolved FFT, not a
+// separate animated noise field. Long-wave orbital forcing and local pressure
+// redistribute the ripple phase; short waves are attenuated at the bed.
+// State is retained when paused or when the water becomes deep.
+__global__ void sand_transport(const float4 *surface,float4 *sandState,float dt,float depth,int pressureActive){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;
+ if(x>=128||z>=128)return;
+ int i=z*128+x;float4 old=sandState[i];
+ float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);
+ float4 w=surface[16384+i];
+ float shortBed=expf(-6.2831853f*depth/6);
+ float4 a=sample(surface,(float)x*.75f,(float)z*.75f,0);
+ float4 d=pressureActive!=0?sample(surface,(float)x*.75f,(float)z*.75f,2):make_float4(0,0,0,0);
+ float forcing=5*(w.x+shortBed*a.x+d.x*expf(-depth*.8f));
+ float rate=shallow*(forcing+8*(w.y*fabsf(w.y)+w.z*fabsf(w.z)));
+ float step=fminf(.05f,fmaxf(0,dt));
+ // Smooth saturation keeps the bed bounded without a hard phase clipping edge.
+ float next=old.x+step*(rate/(1+old.x*old.x*.25f)-shallow*.015f*old.x);
+ sandState[i]=make_float4(next,0,0,0);
+}
 __device__ float wave_height(const float4 *s,float x,float z,float distance,int pressureActive){
  float a=sample_height(s,x,z,0),b=sample_height(s,x,z,1),d=pressureActive!=0?sample_height(s,x,z,2):0;
  float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
@@ -308,6 +328,14 @@ __device__ float4 sand_relief(float x,float z,float footprint){
  float ridge=cosf(phase)+.18f*cosf(2*phase+.6f),derivative=-sinf(phase)-.36f*sinf(2*phase+.6f);
  return make_float4(amp*ridge,ampX*ridge+amp*derivative*phaseX,ampZ*ridge+amp*derivative*phaseZ,phase);
 }
+__device__ float4 sand_moving(float x,float z,float footprint,float4 drift,float anchorX,float anchorZ){
+ // Phase is locally linear over the millimetre-scale bed intersection correction.
+ float phaseShift=drift.x+drift.y*(x-anchorX)+drift.z*(z-anchorZ);
+ float dz=phaseShift/31;
+ float4 relief=sand_relief(x,z+dz,footprint);
+ relief.y+=relief.z*drift.y/31;relief.z*=1+drift.z/31;
+ return relief;
+}
 // Rounded joins between irregular rock faces, carrying shape derivatives.
 __device__ float3 rock_join(float3 a,float3 b){
  float h=clamp01(.5f+.5f*(a.x-b.x)/.09f);
@@ -358,8 +386,8 @@ __device__ float4 stone_relief(float x,float z,float footprint){
  }
  return make_float4(height,gradientX,gradientZ,tone>=0?tone+1:-shadow);
 }
-__device__ float bottom_pc(float x,float z,float depth,float footprint){
- return bottom(x,z,depth)+sand_relief(x,z,footprint).x+stone_relief(x,z,footprint).x;
+__device__ float bottom_pc(float x,float z,float depth,float footprint,float4 drift,float anchorX,float anchorZ){
+ return bottom(x,z,depth)+sand_moving(x,z,footprint,drift,anchorX,anchorZ).x+stone_relief(x,z,footprint).x;
 }
 __device__ float3 seabed_pc(float x,float z,float footprint,float4 sand,float4 stone,float3 sun,float3 view){
  float broad=materialNoise(x*.42f,z*.42f),mid=materialNoise(x*3.1f+17,z*3.1f),fine=1/(1+footprint*footprint*80000);
@@ -390,8 +418,9 @@ __device__ float3 seabed_pc(float x,float z,float footprint,float4 sand,float4 s
 __global__ void bed_quality_probe(float4 *output,int count){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
  float x=((float)(i%64)-32)*.0913f,z=((float)(i/64)-32)*.0971f,e=.0001f;
- float4 sand=sand_relief(x,z,.001f),stone=stone_relief(x,z,.001f);
- float sx=(sand_relief(x+e,z,.001f).x-sand_relief(x-e,z,.001f).x)/(2*e),sz=(sand_relief(x,z+e,.001f).x-sand_relief(x,z-e,.001f).x)/(2*e);
+ float4 drift=make_float4(.7f,.2f,-.3f,0);
+ float4 sand=sand_moving(x,z,.001f,drift,0,0),stone=stone_relief(x,z,.001f);
+ float sx=(sand_moving(x+e,z,.001f,drift,0,0).x-sand_moving(x-e,z,.001f,drift,0,0).x)/(2*e),sz=(sand_moving(x,z+e,.001f,drift,0,0).x-sand_moving(x,z-e,.001f,drift,0,0).x)/(2*e);
  float4 a=stone_relief(x+e,z,.001f),b=stone_relief(x-e,z,.001f),c=stone_relief(x,z+e,.001f),d=stone_relief(x,z-e,.001f);
  output[i*3]=sand;output[i*3+1]=stone;
  output[i*3+2]=make_float4(sx,sz,(a.x-b.x)/(2*e),(c.x-d.x)/(2*e));
@@ -518,7 +547,7 @@ __device__ float3 shade_pixel(const float4 *surface,const float4 *coefficients,c
  float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
  return col;
 }
-__device__ float3 shade_pixel_pc(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
+__device__ float3 shade_pixel_pc(const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
  int smooth=lightSize>256?1:0;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
@@ -536,9 +565,11 @@ __device__ float3 shade_pixel_pc(const float4 *surface,const float4 *coefficient
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
- if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ float anchorX=bx,anchorZ=bz;float4 drift=make_float4(0,0,0,0);
+ if(depth<3){float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);drift=sample_pc(sandState,bx/16,bz/16,0,1);drift.x*=shallow;drift.y*=shallow/16;drift.z*=shallow/16;}
+ if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint,drift,anchorX,anchorZ)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=vec(0,0,0);
- if(smooth!=0){float4 sand=sand_relief(bx,bz,pixelFootprint),stone=stone_relief(bx,bz,pixelFootprint);float3 bedSun=scale(refractv(scale(sunDir(),-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
+ if(smooth!=0){float4 sand=sand_moving(bx,bz,pixelFootprint,drift,anchorX,anchorZ),stone=stone_relief(bx,bz,pixelFootprint);float3 bedSun=scale(refractv(scale(sunDir(),-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
  else bed=seabed(bx,bz,pixelFootprint);
  float3 ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
@@ -569,11 +600,11 @@ __global__ void render(const float4 *surface,const float4 *coefficients,const fl
 }
 // PC spatial supersampling: average linear radiance before tone mapping.
 // FFT and lighting are shared across all four samples; no extra framebuffer.
-__global__ void render_pc(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
+__global__ void render_pc(const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float3 col=vec(0,0,0);
  for(int j=0;j<2;j++)for(int i=0;i<2;i++){
-  float3 sample=shade_pixel_pc(surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
+  float3 sample=shade_pixel_pc(sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+((float)i+.5f)*.5f,(float)y+((float)j+.5f)*.5f,2);
   col=plus(col,sample);
  }
  image[y*width+x]=pack_color(scale(col,.25f));
@@ -581,8 +612,8 @@ __global__ void render_pc(const float4 *surface,const float4 *coefficients,const
 
 // Diagnostic PC single sampling retains the same materials and relief as PC
 // multisampling. Mobile's entry never depends on these material functions.
-__global__ void render_pc_single(const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
+__global__ void render_pc_single(const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,unsigned *image,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
- float3 col=shade_pixel_pc(surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
+ float3 col=shade_pixel_pc(sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
  image[y*width+x]=pack_color(col);
 }
