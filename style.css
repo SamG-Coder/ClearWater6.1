@@ -9,3 +9,5 @@
 
 #fullscreen{position:fixed;right:175px;top:82px;background:#143a4590;backdrop-filter:blur(10px)}#fullscreen:disabled{opacity:.5;cursor:default}.touch #fullscreen{right:calc(max(16px,env(safe-area-inset-right)) + 112px);top:max(12px,env(safe-area-inset-top));min-width:44px;min-height:44px;backdrop-filter:none}.touch .fullscreen-label{display:none}@media(max-width:700px){#fullscreen{right:150px;top:16px}}
 .touch #fullscreen{color:#ecf8f5}
+
+#toggle,#fullscreen{color:#ecf8f5}#toggle:hover,#fullscreen:hover{color:white;background:#29535dd9}

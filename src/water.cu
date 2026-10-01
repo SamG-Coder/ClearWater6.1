@@ -10,6 +10,21 @@ __device__ float3 scale(float3 a,float b){return vec(a.x*b,a.y*b,a.z*b);}
 __device__ float dotv(float3 a,float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 __device__ float3 unit(float3 a){return scale(a,rsqrtf(fmaxf(.0000001f,dotv(a,a))));}
 __device__ float3 blend(float3 a,float3 b,float t){return plus(scale(a,1-t),scale(b,t));}
+__device__ float3 crossv(float3 a,float3 b){return vec(a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x);}
+__device__ float eased(float a,float b,float x){float t=clamp01((x-a)/(b-a));return t*t*(3-2*t);}
+__device__ float earth_radius(){return 6371000.0f;}
+// Stable ray/sphere roots use altitude explicitly, avoiding R+h-R cancellation.
+// The camera is at (0, altitude, 0); the planet centre is (0, -R, 0).
+__device__ float2 sphere_roots(float altitude,float3 ray,float shell){
+ float R=earth_radius()+shell,h=altitude-shell,b=(R+h)*ray.y,c=h*(2*R+h),disc=b*b-c;
+ if(disc<0)return make_float2(-1,-1);
+ float root=sqrtf(disc),q=-b+(b<0?root:-root);
+ float a=fabsf(q)>.00001f?c/q:0;return make_float2(fminf(a,q),fmaxf(a,q));
+}
+__device__ float globe_hit(float altitude,float3 ray){float2 roots=sphere_roots(altitude,ray,0);return roots.x>0?roots.x:-1;}
+__device__ float3 to_world(const float4 *camera,float3 v){
+ float4 e=camera[5],n=camera[6],b=camera[7];return vec(e.x*v.x+n.x*v.y+b.x*v.z,e.y*v.x+n.y*v.y+b.y*v.z,e.z*v.x+n.z*v.y+b.z*v.z);
+}
 __device__ unsigned scramble(unsigned a){a^=a>>16;a*=2246822519u;a^=a>>13;a*=3266489917u;a^=a>>16;return a;}
 // Scaling these bounded positive floats by 2^-24 is exact in binary32.
 __device__ float randf(unsigned a){return ((float)(scramble(a)&16777215u)+.5f)*.000000059604644775390625f;}
@@ -231,37 +246,102 @@ __device__ float wave_height(const float4 *s,const float4 *brush,float x,float z
  float4 region=wave_region(x,z);float a=sample_height(s,x,z+region.x,0),b=sample_height(s,x,z,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,0).x:0;
  float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
 }
-// Camera basis and depth-only optical factors are computed once per frame.
-// Basis w components carry optical factors; xyz remain camera directions.
-__global__ void camera_step(float4 *camera,float dt,float forward,float side,float up,float lookX,float lookY,float speed,int reset,float depth){
+// Geometry oracle entry: tested independently with double-precision ray equations.
+__global__ void planet_probe(const float4 *points,float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
+ float4 p=points[i];float3 ray=unit(vec(p.y,p.z,p.w));float2 roots=sphere_roots(p.x,ray,0);
+ output[i]=make_float4(globe_hit(p.x,ray),roots.x,roots.y,earth_radius());
+}
+// Navigation uses software double precision in one GPU invocation. Rendering
+// uses camera-relative metres, with altitude stored separately from Earth radius.
+// navigation: global unit up, transported unit east, accumulated local UV metres.
+__global__ void camera_step(float4 *camera,float2 *navigationState,float dt,float forward,float side,float up,float lookX,float lookY,float speed,float zoom,int reset,float depth){
+ // Most frames change only the waves. Preserve the full camera state and
+ // bypass navigation arithmetic until input, a dolly, or a diagnostic pose edit.
+ if(reset==0&&forward==0&&side==0&&up==0&&lookX==0&&lookY==0&&zoom==0&&camera[1].z==0&&camera[5].w==camera[1].x&&camera[6].w==camera[1].y&&camera[8].x==camera[0].y){
+  camera[2].w=depth/.86f;camera[3].w=expf(-depth*.055f);camera[8].y=fminf(30000000.0f,speed*fmaxf(1,camera[0].y*.06f));return;
+ }
+ double nav0=(double)navigationState[0].x+(double)navigationState[0].y;
+ double nav1=(double)navigationState[1].x+(double)navigationState[1].y;
+ double nav2=(double)navigationState[2].x+(double)navigationState[2].y;
+ double nav3=(double)navigationState[3].x+(double)navigationState[3].y;
+ double nav4=(double)navigationState[4].x+(double)navigationState[4].y;
+ double nav5=(double)navigationState[5].x+(double)navigationState[5].y;
+ double nav6=(double)navigationState[6].x+(double)navigationState[6].y;
+ double nav7=(double)navigationState[7].x+(double)navigationState[7].y;
  float4 p=camera[0],r=camera[1];
- if(reset>0){p=reset==2?make_float4(0,8,16,0):make_float4(0,2.6f,4,0);r=make_float4(0,reset==2?-.4f:-.32f,0,0);}
- else{
- r.x+=lookX;r.y=fminf(1.5f,fmaxf(-1.5f,r.y+lookY));
- float length=fmaxf(1,sqrtf(forward*forward+side*side+up*up));float d=dt*speed/length;
- p.x+=d*(sinf(r.x)*cosf(r.y)*forward+cosf(r.x)*side);
- p.z+=d*(-cosf(r.x)*cosf(r.y)*forward+sinf(r.x)*side);
- p.y=fmaxf(.45f,p.y+d*(sinf(r.y)*forward+up));
+ if(reset>0){
+  p=reset==2?make_float4(0,8,16,0):make_float4(0,2.6f,4,0);
+  if(reset==3)p=make_float4(0,earth_radius()*1.25f,4,0);
+  r=make_float4(0,reset==3?-1.5707963f:(reset==2?-.4f:-.32f),0,0);
+  nav0=0.0;nav1=0.0;nav2=1.0;
+  nav3=1.0;nav4=0.0;nav5=0.0;
+  nav6=(double)p.x;nav7=(double)p.z;
+ }else{
+  r.x+=lookX;r.x-=floorf((r.x+3.14159265f)/6.2831853f)*6.2831853f;r.y=fminf(1.5707963f,fmaxf(-1.5707963f,r.y+lookY));
+  r.z+=zoom;float zoomStep=r.z*(1-expf(-dt*10));r.z-=zoomStep;if(fabsf(r.z)<.00001f)r.z=0;
+  if(zoomStep!=0){p.y=fminf(500000000.0f,fmaxf(.45f,(p.y+20)*expf(zoomStep)-20));if(zoomStep>0)r.y=mixf(r.y,-1.5707963f,eased(100,50000,p.y)*(1-expf(-dt*5)));}
+  float flight=fminf(30000000.0f,speed*fmaxf(1,p.y*.06f));
+  float length=fmaxf(1,sqrtf(forward*forward+side*side+up*up)),d=dt*flight/length;
+  float dx=d*(sinf(r.x)*cosf(r.y)*forward+cosf(r.x)*side),dz=d*(-cosf(r.x)*cosf(r.y)*forward+sinf(r.x)*side);
+  p.y=fminf(500000000.0f,fmaxf(.45f,p.y+d*(sinf(r.y)*forward+up)));
+  nav6+=(double)dx;nav7+=(double)dz;
+  float lengthXZ=sqrtf(dx*dx+dz*dz);
+  if(lengthXZ>0){
+   double nx=nav0,ny=nav1,nz=nav2,ex=nav3,ey=nav4,ez=nav5;
+   double bx=ey*nz-ez*ny,by=ez*nx-ex*nz,bz=ex*ny-ey*nx;
+   double tx=(ex*(double)dx+bx*(double)dz)/(double)lengthXZ,ty=(ey*(double)dx+by*(double)dz)/(double)lengthXZ,tz=(ez*(double)dx+bz*(double)dz)/(double)lengthXZ;
+   double angle=(double)lengthXZ/(6371000.0+(double)p.y);
+   angle-=(double)floorf((float)((angle+3.141592653589793)/6.283185307179586))*6.283185307179586;
+   double a2=angle*angle;
+   // Native shader trig has enough angular error to drift hundreds of metres
+   // over a circumnavigation. Evaluate this one navigation rotation in double.
+   double si=angle*(1.0+a2*(-1.0/6.0+a2*(1.0/120.0+a2*(-1.0/5040.0+a2*(1.0/362880.0+a2*(-1.0/39916800.0+a2*(1.0/6227020800.0+a2*(-1.0/1307674368000.0+a2*(1.0/355687428096000.0+a2*(-1.0/121645100408832000.0))))))))));
+   double co=1.0+a2*(-1.0/2.0+a2*(1.0/24.0+a2*(-1.0/720.0+a2*(1.0/40320.0+a2*(-1.0/3628800.0+a2*(1.0/479001600.0+a2*(-1.0/87178291200.0+a2*(1.0/20922789888000.0+a2*(-1.0/6402373705728000.0+a2*(1.0/2432902008176640000.0))))))))));
+   double xx=nx*co+tx*si,yy=ny*co+ty*si,zz=nz*co+tz*si;
+   double inverse=1.0/sqrt(xx*xx+yy*yy+zz*zz);xx*=inverse;yy*=inverse;zz*=inverse;
+   // Exact parallel transport of east along the current great-circle step.
+   double along=ex*tx+ey*ty+ez*tz;
+   ex+=along*(tx*(co-1.0)-nx*si);ey+=along*(ty*(co-1.0)-ny*si);ez+=along*(tz*(co-1.0)-nz*si);
+   double projection=ex*xx+ey*yy+ez*zz;ex-=projection*xx;ey-=projection*yy;ez-=projection*zz;
+   inverse=1.0/sqrt(ex*ex+ey*ey+ez*ez);
+   nav0=xx;nav1=yy;nav2=zz;nav3=ex*inverse;nav4=ey*inverse;nav5=ez*inverse;
+  }
+  // The shared spectral patch stays within millimetre precision at any altitude.
+  p.x=(float)(nav6-(double)floorf((float)((nav6+3072.0)/6144.0))*6144.0);
+  p.z=(float)(nav7-(double)floorf((float)((nav7+3072.0)/6144.0))*6144.0);
  }
  camera[0]=p;camera[1]=r;
  float yawSin=sinf(r.x),yawCos=cosf(r.x),pitchSin=sinf(r.y),pitchCos=cosf(r.y);
  camera[2]=make_float4(yawSin*pitchCos,pitchSin,-yawCos*pitchCos,depth/.86f);
  camera[3]=make_float4(yawCos,0,yawSin,expf(-depth*.055f));
  camera[4]=make_float4(-yawSin*pitchSin,pitchCos,yawCos*pitchSin,0);
+ float3 normal=vec((float)nav0,(float)nav1,(float)nav2),east=vec((float)nav3,(float)nav4,(float)nav5),back=crossv(east,normal);
+ camera[5]=make_float4(east.x,east.y,east.z,r.x);camera[6]=make_float4(normal.x,normal.y,normal.z,r.y);camera[7]=make_float4(back.x,back.y,back.z,0);
+ camera[8]=make_float4(p.y,fminf(30000000.0f,speed*fmaxf(1,p.y*.06f)),earth_radius(),0);
+ float3 sun=unit(vec(-.42f,.63f,.66f));camera[9]=make_float4(dotv(sun,east),dotv(sun,normal),dotv(sun,back),0);
+ {float hi=(float)nav0;navigationState[0]=make_float2(hi,(float)(nav0-(double)hi));}
+ {float hi=(float)nav1;navigationState[1]=make_float2(hi,(float)(nav1-(double)hi));}
+ {float hi=(float)nav2;navigationState[2]=make_float2(hi,(float)(nav2-(double)hi));}
+ {float hi=(float)nav3;navigationState[3]=make_float2(hi,(float)(nav3-(double)hi));}
+ {float hi=(float)nav4;navigationState[4]=make_float2(hi,(float)(nav4-(double)hi));}
+ {float hi=(float)nav5;navigationState[5]=make_float2(hi,(float)(nav5-(double)hi));}
+ {float hi=(float)nav6;navigationState[6]=make_float2(hi,(float)(nav6-(double)hi));}
+ {float hi=(float)nav7;navigationState[7]=make_float2(hi,(float)(nav7-(double)hi));}
 }
 // Project the pointer to the actual FFT surface on the GPU, retaining the
 // previous hit so a held drag injects force along its world-space path.
 __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *brush,float pointerX,float pointerY,float aspect,int held,int moving,int pressureActive){
  float4 domain=brush[2];domain.z=0;brush[2]=domain;
  float4 old=brush[1];brush[0]=make_float4(0,0,0,0);
- if(held==0){brush[1]=make_float4(old.x,old.y,0,0);return;}
+ if(held==0||camera[0].y>500){brush[1]=make_float4(old.x,old.y,0,0);return;}
  float4 p=camera[0],r=camera[1];
  float3 f=vec(sinf(r.x)*cosf(r.y),sinf(r.y),-cosf(r.x)*cosf(r.y));
  float3 right=vec(cosf(r.x),0,sinf(r.x)),up=vec(-sinf(r.x)*sinf(r.y),cosf(r.y),cosf(r.x)*sinf(r.y));
  float3 ray=unit(plus(f,plus(scale(right,pointerX*aspect*.65f),scale(up,pointerY*.65f))));
  if(ray.y>-.06f){brush[1]=make_float4(old.x,old.y,0,0);return;}
- float t=-p.y/ray.y;
- for(int j=0;j<4;j++){float h=wave_height(surface,brush,p.x+ray.x*t,p.z+ray.z*t,t,pressureActive);t=mixf(t,(h-p.y)/ray.y,.75f);}
+ float t=globe_hit(p.y,ray);if(t<0||t>2000){brush[1]=make_float4(old.x,old.y,0,0);return;}
+ for(int j=0;j<4;j++){float h=wave_height(surface,brush,p.x+ray.x*t,p.z+ray.z*t,t,pressureActive)-(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-p.y)/ray.y,.75f);}
  float x=p.x+ray.x*t,z=p.z+ray.z*t;
  if(domain.w==0||fabsf(x-domain.x)>6||fabsf(z-domain.y)>6){domain=make_float4(x,z,1,1);brush[2]=domain;}
 
@@ -298,17 +378,17 @@ __device__ float3 refract_cosine(float3 d,float3 n,float eta,float c){return min
 __device__ float3 refractv(float3 d,float3 n,float eta){return refract_cosine(d,n,eta,dotv(d,n));}
 __device__ float3 sunDir(){return unit(vec(-.42f,.66f,-.63f));}
 __device__ float positive_power(float value,float exponent){return value>0?exp2f(log2f(value)*exponent):0;}
-__device__ float3 sky(float3 d){
+__device__ float3 sky(float3 d,float3 sunDirection){
  float v=positive_power(clamp01(d.y),.45f);float3 col=blend(vec(.38f,.55f,.68f),vec(.045f,.16f,.36f),v);
  // Explicit fixed powers avoid the compiler's software-f64 integer pow path.
- float sun=fmaxf(0,dotv(d,sunDir())),s2=sun*sun,s4=s2*s2,s8=s4*s4,s16=s8*s8;
+ float sun=fmaxf(0,dotv(d,sunDirection)),s2=sun*sun,s4=s2*s2,s8=s4*s4,s16=s8*s8;
  // Below .99 the disk power is smaller than the minimum float value.
  float sunDisk=sun>.99f?positive_power(sun,16000):0;
  col=plus(col,scale(vec(1,.83f,.55f),sunDisk*20+s16*s16*s16*.07f));
  float cloud=clamp01(.5f+.25f*sinf(d.x*28+d.z*17)+.25f*sinf(d.z*43-d.x*12));
  float cloud2=cloud*cloud,cloud4=cloud2*cloud2;
  float cirrus=cloud4*cloud4*clamp01(d.y*3)*.22f;
- return blend(col,vec(.94f,.96f,1),cirrus);
+ return scale(blend(col,vec(.94f,.96f,1),cirrus),.015f+.985f*eased(-.08f,.3f,sunDirection.y));
 }
 __device__ float bottom(float x,float z,float depth){return -depth+.10f*sinf(x*.19f)*sinf(z*.23f)+.04f*sinf(x*.63f+z*.31f);}
 __device__ float materialNoise(float x,float z){
@@ -549,21 +629,84 @@ __device__ float3 caustic(const float4 *light,const float *monoLight,float x,flo
  return vec(mixf(mixf(p.x,q.x,a),mixf(r.x,t.x,a),b),mixf(mixf(p.y,q.y,a),mixf(r.y,t.y,a),b),mixf(mixf(p.z,q.z,a),mixf(r.z,t.z,a),b));
 }
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
+// Seam-free 3D cloud density on the spherical normal; no latitude texture seam.
+__device__ float globe_noise(float3 p){
+ float ix=floorf(p.x),iy=floorf(p.y),iz=floorf(p.z),x=fract(p.x),y=fract(p.y),z=fract(p.z);
+ x=x*x*(3-2*x);y=y*y*(3-2*y);z=z*z*(3-2*z);float value=0;
+ for(int k=0;k<2;k++)for(int j=0;j<2;j++)for(int i=0;i<2;i++){
+  unsigned h=(unsigned)((int)(ix+(float)i)*92837111+(int)(iy+(float)j)*689287499+(int)(iz+(float)k)*283923481);
+  value+=randf(h)*(i==0?1-x:x)*(j==0?1-y:y)*(k==0?1-z:z);
+ }return value;
+}
+__device__ float3 space_stars(float3 d){
+ float3 q=scale(d,1300);float ix=floorf(q.x),iy=floorf(q.y),iz=floorf(q.z);
+ unsigned seed=(unsigned)((int)ix*92837111+(int)iy*689287499+(int)iz*283923481);float chance=randf(seed);
+ float glow=chance>.99965f?(.15f+randf(seed+17u)*.7f):0;
+ return vec(glow*.84f,glow*.91f,glow);
+}
+__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit){
+ float altitude=camera[0].y,R=earth_radius();float4 sl=camera[9];float3 sun=vec(sl.x,sl.y,sl.z),worldRay=to_world(camera,ray);
+ float visibility=fmaxf(eased(25000,90000,altitude),1-eased(-.12f,.08f,sun.y));
+ float3 color=scale(space_stars(worldRay),visibility);float sunDot=dotv(ray,sun);
+ if(sunDot>.99996f)color=plus(color,vec(18,15,11));
+ if(hit>0){
+  float3 localNormal=unit(vec(ray.x*hit,R+altitude+ray.y*hit,ray.z*hit)),normal=to_world(camera,localNormal);
+  float day=clamp01(dotv(localNormal,sun)),limb=1-clamp01(-dotv(localNormal,ray));
+  float basin=globe_noise(scale(normal,7));
+  float3 ocean=blend(vec(.006f,.022f,.065f),vec(.009f,.065f,.09f),basin);
+  color=scale(ocean,.025f+day*1.6f);
+  float3 halfv=unit(minus(sun,ray));float spec=positive_power(fmaxf(0,dotv(halfv,localNormal)),420)*2.0f*day;
+  color=plus(color,scale(vec(1,.86f,.64f),spec));
+  float3 cloudP=plus(scale(normal,19),vec(2.8f,1.2f,-1.7f));
+  float low=globe_noise(cloudP),detail=globe_noise(scale(cloudP,2.73f)),fine=globe_noise(scale(cloudP,7.1f));
+  float bands=.055f*sinf(normal.y*31+normal.x*11);
+  float cover=eased(.48f,.68f,low*.64f+detail*.26f+fine*.10f+bands);
+  float shadow=cover*.3f;color=scale(color,1-shadow);
+  float3 cloudColor=scale(vec(.84f,.88f,.92f),.025f+day*1.2f);
+  color=blend(color,cloudColor,cover*.92f);
+  color=plus(color,scale(vec(.006f,.017f,.027f),limb*limb*day));
+ }
+ // Eight samples through a 100 km exponential atmosphere. Rayleigh extinction
+ // and an approximate slant sunlight path produce the blue limb and terminator.
+ float2 atmosphere=sphere_roots(altitude,ray,100000);
+ if(atmosphere.y>0){
+  float start=fmaxf(0,atmosphere.x),end=hit>0?fminf(hit,atmosphere.y):atmosphere.y;
+  float step=fmaxf(0,end-start)/8;float3 transmission=vec(1,1,1),scatter=vec(0,0,0);
+  float phase=.0596831f*(1+sunDot*sunDot);
+  for(int i=0;i<8;i++){
+   float t=start+((float)i+.5f)*step;float3 p=vec(ray.x*t,R+altitude+ray.y*t,ray.z*t);
+   float radius=sqrtf(dotv(p,p)),h=fmaxf(0,radius-R),density=expf(-h/8500)*step;
+   float mu=dotv(scale(p,1/radius),sun),horizon=-sqrtf(fmaxf(0,2*h/R));
+   float lit=eased(horizon-.025f,horizon+.025f,mu),slant=8500*expf(-h/8500)/(fmaxf(.04f,mu)+.035f);
+   float3 extinction=vec(expf(-density*.0000058f),expf(-density*.0000135f),expf(-density*.0000331f));
+   float3 light=vec(expf(-slant*.0000058f),expf(-slant*.0000135f),expf(-slant*.0000331f));
+   float strength=lit*phase*mixf(18,6,eased(20000,150000,altitude));
+   scatter=plus(scatter,vec(transmission.x*(1-extinction.x)*light.x*strength,transmission.y*(1-extinction.y)*light.y*strength,transmission.z*(1-extinction.z)*light.z*strength));
+   transmission=vec(transmission.x*extinction.x,transmission.y*extinction.y,transmission.z*extinction.z);
+  }
+  color=plus(vec(color.x*transmission.x,color.y*transmission.y,color.z*transmission.z),scatter);
+ }
+ return color;
+}
 __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
  int smooth=lightSize>256?1:0;
  float4 pos=camera[0],forward=camera[2],right=camera[3],up=camera[4];float sx=(2*pixelX/(float)width-1)*(float)width/(float)height;
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
  float3 r=vec(right.x,right.y,right.z),u=vec(up.x,up.y,up.z);
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
- if(ray.y<-.0005f){
- float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ float4 solar=camera[9];float3 localSun=vec(solar.x,solar.y,solar.z);
+ float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
+ float vignette=1-.10f*(sx*sx+sy*sy);
+ if(globeT<0||planetMix>=1)return scale(planet_radiance(ray,camera,globeT),exposure*vignette);
+ if(globeT>0){
+ float t=globeT;float4 w=make_float4(0,0,0,0);
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
- w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y+ray.x*t/earth_radius(),1,-w.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
- float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));
+ float3 reflected=sky(minus(ray,scale(n,2*viewCosine)),localSun);
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<(smooth!=0?4:2);j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
@@ -573,15 +716,16 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  ca=blend(vec(1,1,1),ca,causticDetail*right.w);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
- col=blend(through,reflected,fresnel);
- float3 halfv=unit(minus(sunDir(),ray));
+ col=blend(scale(through,.015f+.985f*eased(-.08f,.3f,localSun.y)),reflected,fresnel);
+ float3 halfv=unit(minus(localSun,ray));
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec));
  float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
- }else{col=sky(ray);}
- float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
+ }else{col=sky(ray,localSun);}
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT),planetMix);
+ col=scale(col,exposure*vignette);
  return col;
 }
 __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
@@ -590,15 +734,19 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float sy=1-2*pixelY/(float)height;float3 f=vec(forward.x,forward.y,forward.z);
  float3 r=vec(right.x,right.y,right.z),u=vec(up.x,up.y,up.z);
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float3 col=vec(0,0,0);
- if(ray.y<-.0005f){
- float t=-pos.y/ray.y;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ float4 solar=camera[9];float3 localSun=vec(solar.x,solar.y,solar.z);
+ float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
+ float vignette=1-.10f*(sx*sx+sy*sy);
+ if(globeT<0||planetMix>=1)return scale(planet_radiance(ray,camera,globeT),exposure*vignette);
+ if(globeT>0){
+ float t=globeT;float4 w=make_float4(0,0,0,0);
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
- w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y,1,-w.z));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
+ w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 n=unit(vec(-w.y+ray.x*t/earth_radius(),1,-w.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
- float3 reflected=sky(minus(ray,scale(n,2*viewCosine)));
+ float3 reflected=sky(minus(ray,scale(n,2*viewCosine)),localSun);
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
@@ -606,7 +754,7 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  if(depth<3){float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);drift=sample_pc(sandState,bx/16,bz/16,0,1);drift.x*=shallow;drift.y*=shallow/16;drift.z*=shallow/16;}
  if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint,drift,anchorX,anchorZ)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=vec(0,0,0);
- if(smooth!=0){float4 sand=sand_moving(bx,bz,pixelFootprint,drift,anchorX,anchorZ),stone=stone_relief(bx,bz,pixelFootprint);float3 bedSun=scale(refractv(scale(sunDir(),-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
+ if(smooth!=0){float4 sand=sand_moving(bx,bz,pixelFootprint,drift,anchorX,anchorZ),stone=stone_relief(bx,bz,pixelFootprint);float3 bedSun=scale(refractv(scale(localSun,-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
  else bed=seabed(bx,bz,pixelFootprint);
  float3 ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
@@ -614,15 +762,16 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  ca=blend(vec(1,1,1),ca,causticDetail*right.w);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
- col=blend(through,reflected,fresnel);
- float3 halfv=unit(minus(sunDir(),ray));
+ col=blend(scale(through,.015f+.985f*eased(-.08f,.3f,localSun.y)),reflected,fresnel);
+ float3 halfv=unit(minus(localSun,ray));
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec));
  float haze=1-expf(-t*.00025f);col=blend(col,vec(.38f,.55f,.68f),haze);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
- }else{col=sky(ray);}
- float vignette=1-.10f*(sx*sx+sy*sy);col=scale(col,exposure*vignette);
+ }else{col=sky(ray,localSun);}
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT),planetMix);
+ col=scale(col,exposure*vignette);
  return col;
 }
 __device__ unsigned pack_color(float3 col){

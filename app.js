@@ -3,12 +3,12 @@ const assetVersion=new URL(import.meta.url).searchParams.get('v')||'local';
 const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
 if(touchDevice){document.body.classList.add('touch','clean');$('quality').value='mobile';$('toggle').textContent='Settings';$('fly').textContent='Push water';$('touchMode').textContent='Mode: Look';}
-let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=touchDevice,lastWind=-1,lastDepth=-1,disturbanceActive=false,pcSampleOverride=0;
+let adaptiveScale=1,frameAverage=0,adaptCount=0,touchLook=touchDevice,lastWind=-1,lastDepth=-1,disturbanceActive=false,pcSampleOverride=0,telemetryBusy=false;
 const pcQuality=()=>$('quality').value!=='mobile'&&($('quality').value!=='768'||pcSampleOverride===4);
 const mapSize=()=>pcQuality()?512:256;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
-let sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
+let navigation,zoomDelta=0,sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
 const fixed=new URLSearchParams(location.search).get('t');if(fixed!==null){time=Number(fixed);playing=false;}
 $('pause').textContent=playing?'Pause':'Resume';
@@ -17,6 +17,7 @@ function labels(){for(const id of ['depth','energy','wind','exposure'])$(id+'Val
 for(const id of ['depth','energy','wind','exposure'])$(id).oninput=labels;
 $('toggle').onclick=()=>{resetSticks();keys.clear();padPointers.clear();document.body.classList.toggle('clean');$('toggle').textContent=touchDevice?(document.body.classList.contains('clean')?'Settings':'Close settings'):(document.body.classList.contains('clean')?'Show controls ↙':'Hide controls ↗');};
 $('pause').onclick=()=>{playing=!playing;$('pause').textContent=playing?'Pause':'Resume';};$('reset').onclick=()=>reset=1;
+$('space').onclick=()=>{reset=3;zoomDelta=0;};
 $('fly').onclick=()=>{if(touchDevice){touchLook=!touchLook;$('fly').textContent=touchLook?'Push water':'Look around';$('touchMode').textContent=touchLook?'Mode: Look':'Mode: Water';}else canvas.requestPointerLock?.();};
 $('touchMode').onclick=()=>$('fly').click();
 const fullscreenButton=$('fullscreen'),fullscreenRoot=document.documentElement;
@@ -28,13 +29,15 @@ for(const event of ['fullscreenchange','webkitfullscreenchange'])document.addEve
 
 $('quality').onchange=()=>{adaptiveScale=1;frameAverage=0;adaptCount=0;};
 for(const id of ['shallows','ocean'])$(id).onclick=()=>{const ocean=id==='ocean';$('depth').value=ocean?8:1.4;$('energy').value=ocean?1.8:.8;reset=ocean?2:1;for(const p of ['shallows','ocean'])$(p).classList.toggle('active',p===id);labels();};
-addEventListener('keydown',e=>{if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
+addEventListener('keydown',e=>{if(e.code==='Escape'){document.exitPointerLock?.();drag=false;held=false;forceMoved=false;}if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
 addEventListener('keyup',e=>keys.delete(e.code));addEventListener('blur',()=>{keys.clear();drag=false;held=false;});
 function pointer(e){const r=canvas.getBoundingClientRect(),x=2*(e.clientX-r.left)/r.width-1,y=1-2*(e.clientY-r.top)/r.height;if(x!==pointerX||y!==pointerY)forceMoved=true;pointerX=x;pointerY=y;}
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
+const zoomTouches=new Map();let pinchGap=0;
 let touchPointer=null,touchLastX=0,touchLastY=0;
-function endPointer(e){if(touchPointer===null||e.pointerId===touchPointer){drag=false;held=false;forceMoved=false;touchPointer=null;}}
+function endPointer(e){zoomTouches.delete(e.pointerId);if(zoomTouches.size<2)pinchGap=0;if(touchPointer===null||e.pointerId===touchPointer){drag=false;held=false;forceMoved=false;touchPointer=null;}}
 canvas.addEventListener('pointerdown',e=>{
+ if(e.pointerType==='touch'){zoomTouches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(zoomTouches.size===2){const [a,b]=[...zoomTouches.values()];pinchGap=Math.hypot(a.x-b.x,a.y-b.y);held=drag=forceMoved=false;touchPointer=null;canvas.setPointerCapture(e.pointerId);return;}}
  if(e.pointerType==='touch'&&touchPointer!==null)return;
  pointer(e);forceMoved=false;
  if(e.pointerType==='touch'){touchPointer=e.pointerId;drag=touchLook;held=!touchLook;touchLastX=e.clientX;touchLastY=e.clientY;}
@@ -42,6 +45,7 @@ canvas.addEventListener('pointerdown',e=>{
  canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove',e=>{
+ if(e.pointerType==='touch'&&zoomTouches.has(e.pointerId)){zoomTouches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(zoomTouches.size===2){const [a,b]=[...zoomTouches.values()],gap=Math.hypot(a.x-b.x,a.y-b.y);if(pinchGap>0&&gap>0)zoomDelta=Math.max(-8,Math.min(8,zoomDelta+Math.log(pinchGap/gap)*3));pinchGap=gap;return;}}
  if(e.pointerType==='touch'){
   if(e.pointerId!==touchPointer)return;
   if(drag){lookX+=(e.clientX-touchLastX)*.004;lookY-=(e.clientY-touchLastY)*.004;}
@@ -68,10 +72,10 @@ for(const button of document.querySelectorAll('[data-move]')){
  button.addEventListener('pointerdown',e=>{e.preventDefault();padPointers.set(e.pointerId,button.dataset.move);keys.add(button.dataset.move);button.setPointerCapture(e.pointerId);button.classList.add('active');});
  for(const event of ['pointerup','pointercancel','lostpointercapture'])button.addEventListener(event,e=>{const key=padPointers.get(e.pointerId);padPointers.delete(e.pointerId);if(key&&![...padPointers.values()].includes(key))keys.delete(key);button.classList.remove('active');});
 }
-addEventListener('blur',()=>{touchPointer=null;padPointers.clear();resetSticks();});
-document.addEventListener('visibilitychange',()=>{last=0;held=drag=false;keys.clear();touchPointer=null;padPointers.clear();resetSticks();});
+addEventListener('blur',()=>{touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();});
+document.addEventListener('visibilitychange',()=>{last=0;held=drag=false;keys.clear();touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();});
 addEventListener('resize',resetSticks);
-canvas.addEventListener('wheel',e=>{e.preventDefault();speed=Math.min(100,Math.max(.2,speed*Math.exp(-e.deltaY*.001)));},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();const delta=Math.max(-1000,Math.min(1000,e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1)));if(document.pointerLockElement===canvas){speed=Math.min(1000000,Math.max(.2,speed*Math.exp(-delta*.002)));}else{zoomDelta=Math.max(-8,Math.min(8,zoomDelta+delta*.003));}},{passive:false});
 function resize(){
  const mobile=mobileProfile(),aspect=innerWidth/innerHeight;
  const lightChannels=mobile?1:3,lightSize=mapSize(),texels=lightSize*lightSize;
@@ -102,7 +106,7 @@ function compute(dt,timestampWrites){
  if(held&&forceMoved)disturbanceActive=true;
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
- b.dispatch(bind('camera_step',{camera},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),reset,depth}),[1,1,1]);reset=0;lookX=lookY=0;
+ b.dispatch(bind('camera_step',{camera,navigationState:navigation},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),zoom:zoomDelta,reset,depth}),[1,1,1]);zoomDelta=0;reset=0;lookX=lookY=0;
  b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
  if(depth!==lastDepth){b.dispatch(bind('prepare_modes',{motion},{depth}),[16,16,3]);lastDepth=depth;diagnostics.dispersionSeeds=(diagnostics.dispersionSeeds||0)+1;}
  if(disturbanceActive)b.dispatch(bind('force_modes',{disturbance,brush,motion},{dt:playing?dt:0,clear:0}),[16,16,1]);
@@ -118,6 +122,8 @@ function compute(dt,timestampWrites){
  b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{brush,...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
+function updateMetrics(){if(diagnostics.ready)$('metrics').textContent=`${Math.round(diagnostics.fps)} FPS · ${width} × ${height} · ${formatDistance(diagnostics.altitude||2.6)} altitude · ${formatDistance(diagnostics.flightSpeed||speed)}/s`;}
+function formatDistance(value){return value>=1000?(value/1000).toFixed(value>=100000?0:1)+' km':value.toFixed(1)+' m';}
 async function frame(now){
  if(failed)return;
  try{
@@ -128,13 +134,18 @@ async function frame(now){
    diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;diagnostics.ready=true;diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
    frameAverage=frameAverage?frameAverage*.94+diagnostics.frameMs*.06:diagnostics.frameMs;
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
-   if(diagnostics.frames===1||diagnostics.frames%15===0)$('metrics').textContent=`${Math.round(diagnostics.fps)} FPS · ${width} × ${height} · ${speed.toFixed(1)} m/s`;
+   if(diagnostics.frames%15===0&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,16,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
+   if(diagnostics.frames===1||diagnostics.frames%15===0)updateMetrics();
   }
   requestAnimationFrame(frame);
  }catch(e){fail(e);}
 }
 async function exclusive(fn){busy=true;try{await runtime.idle();return await fn();}finally{busy=false;}}
 window.waterLab={
+ async geometryTest(points){return exclusive(async()=>{const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('planet_probe',{points:input,output:out},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.planet_probe.clear();}});},
+ async planetState(){return exclusive(async()=>{const c=await runtime.read(camera),raw=await runtime.read(navigation);diagnostics.altitude=c[1];diagnostics.flightSpeed=c[33];updateMetrics();return {altitude:c[0*4+1],radius:c[8*4+2],speed:c[8*4+1],normal:Array.from(c.slice(24,27)),east:Array.from(c.slice(20,23)),back:Array.from(c.slice(28,31)),camera:Array.from(c.slice(0,8)),navigation:Array.from({length:8},(_,i)=>raw[i*2]+raw[i*2+1]),finite:c.every(Number.isFinite)};});},
+ async setAltitude(meters){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,4,new Float32Array([meters]));compute(0);await runtime.idle();});},
+ async flightTest(steps,seconds,forward,side,up,speed){return exclusive(async()=>{for(let i=0;i<steps;i++)runtime.batch().dispatch(bind('camera_step',{camera,navigationState:navigation},{dt:seconds/steps,forward,side,up,lookX:0,lookY:0,speed,zoom:0,reset:0,depth:Number($('depth').value)}),[1,1,1]).submit();compute(0);await runtime.idle();});},
  async setPixelSamples(count){if(count!==0&&count!==1&&count!==4)throw Error('Pixel samples must be 0 (automatic), 1 or 4');return exclusive(async()=>{pcSampleOverride=count;resize();compute(0);await runtime.idle();});},
  async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));compute(0);await runtime.idle();});},
  async lookDown(){return exclusive(async()=>{const update=new Float32Array([0,-.95,0,0]);runtime.device.queue.writeBuffer(camera.gpuBuffer,16,update);compute(0);await runtime.idle();});},
@@ -205,11 +216,11 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe'];
  const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe']){
+ for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe']){
   $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
   const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
  }
- motion=runtime.createBuffer(81920*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);camera=runtime.createBuffer(80);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
+ motion=runtime.createBuffer(81920*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer(10*16);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
 }catch(e){fail(e);}

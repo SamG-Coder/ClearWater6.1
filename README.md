@@ -128,3 +128,18 @@ Background short waves use deterministic per-region random phase offsets, blende
 `waterLab.domainTest()` queries real GPU fields: a live local wake remains nonzero, its copy 24 metres away is exactly zero, and an untapered negative control reproduces the old ghost. It also checks regional variation and analytic gradients at region/taper boundaries. Force and mobile interaction tests exercise these checks alongside existing controls. Mobile images intentionally differ from the earlier uniform tiling release.
 
 The optimization regression baseline is now `0bb6aea`, the first local-interaction/regional-variation release. Future optimization passes must again preserve its mobile images and normalized shader operations exactly; the baseline update accepts the requested feature change rather than removing the checks.
+
+
+## Earth-scale ocean and space flight
+
+The ocean now wraps an analytic sphere with a radius of 6,371,000 metres (diameter 12,742 km). All distances and travel speeds use metres and seconds. This is a procedural ocean planet at Earth's mean spherical size; the project does not contain geographical land or elevation data. Close to the surface, the original FFT water, refraction, caustics, sand and local touch wake remain available. Distant rays transition to the curved ocean, a procedural cloud layer, an approximate exponential atmosphere, sunlight and stars. The same camera and spherical intersection run throughout the transition.
+
+- WASD flies; Q/E descend and rise relative to the current planetary surface. Shift boosts speed.
+- With the mouse free, wheel-out smoothly retreats toward space and wheel-in approaches the water. Travel speed grows with altitude.
+- Click Fly camera for mouse lock. In this mode, wheel-up increases flight speed and wheel-down reduces it without changing altitude. Escape releases the mouse.
+- The Space preset frames the entire globe. Shallows or Reset returns to the surface.
+- On touch devices, pinch inward to retreat and spread two fingers to approach. The movement joystick, altitude buttons and screen-drag look remain available. Pinching never pushes the water.
+
+The camera follows great-circle steps and transports its local frame across poles. A single CUDA invocation uses software double arithmetic, stored as high/low float pairs; a small double polynomial rotation avoids the accumulated error of native shader trigonometry. Rendering stays float32 and camera-relative, with altitude separate from the 6,371 km radius. The FFT/material chart remains bounded for close-up precision; it is a local procedural detail layer, not a globally persistent terrain map. There is no planet-sized FFT allocation. A 16-byte camera telemetry read every 15 frames updates altitude and speed labels independently of rendering.
+
+`npm run test:planet` checks spherical ray intersections against independent JavaScript double equations, an entire Earth circuit, metre-scale movement on the far side, pole crossing, actual wheel input, flight-speed adjustment, touch pinch input, and real 1440p/4K space framebuffers. It also saves views from orbital height down to the shallow water. The atmosphere and cloud layer are visual approximations. Browser tests use local NVIDIA/Edge and Chromium phone emulation; physical Samsung and Safari behaviour still requires device testing.
