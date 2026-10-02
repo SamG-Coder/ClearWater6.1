@@ -4,10 +4,24 @@
  <div class="menu-shade"></div><div class="orbital-guide" aria-hidden="true"><span></span></div>
  <div class="menu-top"><a class="game-brand" href="./"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 29 26H3Z M16 11 22 22H10Z"/></svg>CLEARWATER <small>6.1</small></a><span id="menuContext">FLIGHT SYSTEM / 6.1</span></div>
  <main class="menu-body">
+  <section data-screen="boot" class="boot-screen" hidden>
+   <div class="departure-art" aria-hidden="true">
+    <div class="departure-orbit"></div>
+    <svg class="craft-schematic" viewBox="0 0 520 440" fill="none">
+     <g class="schematic-guides"><path d="M260 20v400M30 220h460M80 70l360 300M80 370 440 70"/><circle cx="260" cy="220" r="165"/><circle cx="260" cy="220" r="190" stroke-dasharray="2 12"/><path d="M95 32H62v33M425 32h33v33M95 408H62v-33M425 408h33v-33"/></g>
+     <g class="schematic-hull"><path d="m260 66 32 48 17 158-16 72h-66l-16-72 17-158Z"/><path d="m211 204-119 50v46l125-15m92-81 119 50v46l-125-15"/><path d="m247 106-12 40-4 80 29-15 29 15-4-80-12-40Z"/><path d="M234 260h52v59h-52zM252 227h16v90h-16z"/><path d="M127 170h40l11 22v139l-11 23h-40l-11-23V192ZM353 170h40l11 22v139l-11 23h-40l-11-23V192Z"/><path d="M116 201h62m-62 18h62m-62 95h62m-62 17h62m164-130h62m-62 18h62m-62 95h62m-62 17h62M126 244h42m184 0h42M126 259h42m184 0h42M126 274h42m184 0h42"/></g>
+     <g class="schematic-lights"><path d="M130 354v24m34-24v24m192-24v24m34-24v24M249 120h22l6 62h-34Z"/><path d="M100 244h16m288 0h16"/></g>
+     <g class="schematic-labels"><path d="M161 185 92 128H26m264 16 90-55h98M309 284l59 105h110"/><circle cx="161" cy="185" r="3"/><circle cx="290" cy="144" r="3"/><circle cx="309" cy="284" r="3"/><text x="26" y="119">TWIN DRIVE</text><text x="385" y="80">FLIGHT DECK</text><text x="385" y="409">CRAFT / 01</text></g>
+    </svg>
+    <div class="schematic-caption"><span>EXPLORATION CRAFT / 01</span><strong>Ocean to orbit.</strong><small>ONE CONTINUOUS WORLD · EARTH SCALE 1:1</small></div>
+   </div>
+   <div class="departure-panel"><p class="menu-eyebrow"><span></span> YOUR NEXT HORIZON</p><h1 class="departure-title">Preparing for<br>departure<span>.</span></h1><div id="bootLoading"></div><button id="bootSettings" class="text-button">Flight settings <span aria-hidden="true">↗</span></button></div>
+  </section>
   <section data-screen="main" class="main-screen">
    <p class="menu-eyebrow"><span></span> AN OCEAN. A PLANET. BEYOND.</p>
    <h1 class="game-title">CLEAR<span>WATER<span class="title-dot">.</span></span></h1>
    <p class="menu-lead">Leave the horizon behind.</p>
+   <div id="mainLoading"></div>
    <nav class="main-actions" aria-label="Start playing">
     <button id="continueGame" class="menu-action primary" data-launch disabled><span class="action-index">01</span><span><strong>Continue Game</strong><small id="continueDetail">No saved flight yet</small></span><span class="action-arrow">↗</span></button>
     <button id="newGame" class="menu-action" data-launch disabled><span class="action-index">02</span><span><strong>New Game</strong><small>Your craft. Your next horizon.</small></span><span class="action-arrow">↗</span></button>
@@ -18,6 +32,7 @@
   <section data-screen="pause" class="pause-screen" hidden>
    <p class="menu-eyebrow"><span></span><span id="pauseMode">NORMAL GAME</span> / FLIGHT HELD</p>
    <h1 class="screen-title">Take a<br>breath<span>.</span></h1><p class="menu-lead">Your next horizon can wait.</p>
+   <div id="pauseLoading"></div>
    <nav class="main-actions" aria-label="Paused game">
     <button id="resumeGame" class="menu-action primary"><span class="action-index">01</span><span><strong>Resume Flight</strong><small>Pick up where you left off</small></span><span class="action-arrow">↗</span></button>
     <button id="pauseSettings" class="menu-action"><span class="action-index">02</span><span><strong>Settings</strong><small>Graphics, display &amp; flight controls</small></span><span class="action-arrow">+</span></button>
@@ -27,6 +42,7 @@
   </section>
   <section data-screen="settings" class="settings-screen" hidden>
    <div class="settings-heading"><div><p class="menu-eyebrow">FLIGHT CONFIGURATION</p><h1 class="screen-title">Settings<span>.</span></h1></div><button id="settingsBack" class="back-button">← Back <kbd>Esc</kbd></button></div>
+   <div id="settingsLoading"></div>
    <div class="settings-tabs" role="tablist" aria-label="Settings categories"><button id="graphicsTab" role="tab" aria-controls="graphicsPage" aria-selected="true" data-tab="graphics" class="active">Graphics</button><button id="controlsTab" role="tab" aria-controls="controlsPage" aria-selected="false" tabindex="-1" data-tab="controls">Flight controls</button><button id="settingsWorldTab" role="tab" aria-controls="worldPage" aria-selected="false" tabindex="-1" data-tab="world" hidden>Free Roam world</button></div>
    <div class="settings-pages">
     <section id="graphicsPage" role="tabpanel" aria-labelledby="graphicsTab" data-tab-panel="graphics"><div class="setting-intro"><h2>A window to another world.</h2><p>Choose the detail that feels right for your device.</p></div><div id="graphicsControls" class="settings-grid"></div><label class="switch-row">Flight instruments<span>Speed, altitude and control hints</span><input type="checkbox" id="showHUD" checked></label><p class="setting-note">Mobile / Auto adjusts resolution for your device. Desktop profiles preserve detailed water, terrain and spacecraft shading. Resolution is limited by your display and GPU.</p><button id="restoreSettings" class="text-button">Restore default settings ↺</button></section>
@@ -62,4 +78,19 @@
 <p class="hint">Left-drag pushes water · Right-drag looks<br>WASD to fly<br>Q / E lower / rise · Shift boost<br>Wheel out / in: space / surface<br>Flying: wheel adjusts speed · Esc releases mouse</p><div class="engine">CUDA WEBSHADER <span>3 × 128² FFT</span></div></aside>
 <nav id="touchControls" aria-label="Touch camera controls"><div id="moveStick" class="joystick" role="group" aria-label="Movement joystick"><span class="stick-label">MOVE</span><span class="stick-knob"></span></div><div class="touch-center"><button id="touchBoost" data-move="ShiftLeft">BOOST</button><div class="altitude"><button data-move="KeyQ" aria-label="Lower camera">−</button><button data-move="KeyE" aria-label="Raise camera">+</button></div><button id="touchMode">Mode: Water</button></div></nav>
 <button id="fullscreen" aria-label="Enter fullscreen" aria-pressed="false" title="Enter fullscreen"><span aria-hidden="true">⛶</span><span class="fullscreen-label"> Fullscreen</span></button><button id="toggle">Hide controls ↗</button><footer><span>REFRACTION / SPECTRAL WAVES / SUNLIGHT CAUSTICS</span><span id="metrics">Preparing the water…</span></footer>
-<div id="flightStatus" role="status" hidden></div><div id="loading"><div class="ripple">≈</div><p id="loadText">Building the surface…</p></div><div id="error" hidden></div><script type="module" src="app.js"></script></body></html>
+<div id="flightStatus" role="status" hidden></div><div id="loading"><div class="ripple">≈</div><p id="loadText">Building the surface…</p></div>
+<section id="flightLoading" class="flight-loading" aria-label="Flight preparation" hidden>
+ <div class="load-heading"><span id="loadPhase">PRE-FLIGHT / 01 OF 05</span><span id="loadElapsed">0:00 elapsed</span></div>
+ <h2 id="loadTitle" role="status" aria-live="polite">Connecting to your GPU</h2><p id="loadDescription">Checking graphics support and opening the flight display.</p>
+ <div id="loadProgress" role="progressbar" aria-label="Flight preparation"><span id="loadProgressFill"></span></div>
+ <div class="load-count-row"><span class="load-activity" aria-hidden="true"></span><span id="loadCount">IN PROGRESS</span></div>
+ <p id="loadPending"></p>
+ <ol class="load-checklist" aria-label="Pre-flight sequence">
+  <li data-load-phase="device"><span class="step-index">01</span><span>Graphics connection</span><span class="step-state">WAITING</span></li>
+  <li data-load-phase="download"><span class="step-index">02</span><span>Shader download</span><span class="step-state">WAITING</span></li>
+  <li data-load-phase="shaders"><span class="step-index">03</span><span>GPU shader preparation</span><span class="step-state">WAITING</span></li>
+  <li data-load-phase="world"><span class="step-index">04</span><span>Spacecraft &amp; planet</span><span class="step-state">WAITING</span></li>
+  <li data-load-phase="frame"><span class="step-index">05</span><span>First view</span><span class="step-state">WAITING</span></li>
+ </ol><button id="loadRetry" class="load-retry" hidden>Retry flight preparation ↻</button>
+</section>
+<div id="error" hidden></div><script type="module" src="app.js"></script></body></html>

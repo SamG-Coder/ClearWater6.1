@@ -12,9 +12,9 @@ for(const m of source.matchAll(/__global__ void (\w+)/g)){
  await writeFile(`kernels/${name}.json`,JSON.stringify(serializableArtifact(artifact)));
  console.log(`Compiled ${name}`);
 }
-for(const file of ['index.html','style.css','app.js','game-shell.js','src','vendor','LICENSE','THIRD_PARTY_NOTICES.md'])await cp(file,`dist/${file}`,{recursive:true});
-const host=await readFile('app.js','utf8'),shell=await readFile('game-shell.js','utf8'),css=await readFile('style.css','utf8'),html=await readFile('index.html','utf8');
-const version=createHash('sha256').update(source).update(host).update(shell).update(css).update(html).digest('hex').slice(0,12);
-await writeFile('dist/app.js',host.replace("'./game-shell.js'",`'./game-shell.js?v=${version}'`));
+for(const file of ['index.html','style.css','app.js','game-shell.js','flight-loading.js','src','vendor','LICENSE','THIRD_PARTY_NOTICES.md'])await cp(file,`dist/${file}`,{recursive:true});
+const host=await readFile('app.js','utf8'),shell=await readFile('game-shell.js','utf8'),loading=await readFile('flight-loading.js','utf8'),css=await readFile('style.css','utf8'),html=await readFile('index.html','utf8');
+const version=createHash('sha256').update(source).update(host).update(shell).update(loading).update(css).update(html).digest('hex').slice(0,12);
+await writeFile('dist/app.js',host.replace("'./game-shell.js'",`'./game-shell.js?v=${version}'`).replace("'./flight-loading.js'",`'./flight-loading.js?v=${version}'`));
 await writeFile('dist/index.html',html.replace('src="app.js"',`src="app.js?v=${version}"`).replace('href="style.css"',`href="style.css?v=${version}"`));
 await writeFile('dist/.nojekyll','');

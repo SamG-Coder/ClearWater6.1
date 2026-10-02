@@ -1,5 +1,6 @@
 import {GpuRuntime} from './vendor/webcuda/runtime/runtime.js';
 import {createGameShell} from './game-shell.js';
+import {createFlightLoading} from './flight-loading.js';
 const assetVersion=new URL(import.meta.url).searchParams.get('v')||'local';
 const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
@@ -18,6 +19,7 @@ let kernelArtifacts;const kernelLoads=new Map();
 let navigation,zoomDelta=0,sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let flyFallback=false,lockPending=false;
 let gameShell=null,menuRedraw=true,flightProfile=0,playTime=0;
+const flightLoading=createFlightLoading(state=>{diagnostics.loading=state;gameShell?.loading(state);});
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
 const params=new URLSearchParams(location.search),shipMode=params.get('mode')==='ship'||(!params.has('t')&&params.get('mode')!=='explorer');
 let shipMesh,shipBounds,shipData,shipInspect=false,shipAction=0;
@@ -32,7 +34,7 @@ $('season').onchange=()=>{weatherSeason=Number($('season').value);weatherDirty=t
 if(new URLSearchParams(location.search).get('geology')==='study')$('depthMode').value='0';
 $('depthMode').onchange=()=>{lastDepth=-1;weatherDirty=true;};
 $('worldSeed').onchange=()=>{weatherDirty=true;};
-function fail(e){failed=true;diagnostics.errors.push(String(e.message||e));$('error').hidden=false;$('error').textContent=diagnostics.errors.at(-1);$('loading').hidden=true;gameShell?.error(diagnostics.errors.at(-1));console.error(e);}
+function fail(e){failed=true;const message=String(e.message||e);diagnostics.errors.push(message);$('error').hidden=!!gameShell;$('error').textContent=message;$('loading').hidden=true;if(gameShell){flightLoading.error(message);gameShell.error(message);}console.error(e);}
 function labels(){for(const id of ['depth','energy','wind','exposure'])$(id+'Value').textContent=Number($(id).value).toFixed(2)+(id==='depth'?' m':id==='wind'?' m/s':'');}labels();
 for(const id of ['depth','energy','wind','exposure'])$(id).oninput=()=>{if(id==='depth'){$('depthMode').value='0';lastDepth=-1;weatherDirty=true;}labels();};
 $('toggle').onclick=()=>{resetSticks();keys.clear();padPointers.clear();document.body.classList.toggle('clean');$('toggle').textContent=touchDevice?(document.body.classList.contains('clean')?'Settings':'Close settings'):(document.body.classList.contains('clean')?'Show controls ↙':'Hide controls ↗');};
@@ -71,7 +73,7 @@ if(!(fullscreenRoot.requestFullscreen||fullscreenRoot.webkitRequestFullscreen)){
 fullscreenButton.onclick=async()=>{try{if(fullscreenElement()){await (document.exitFullscreen||document.webkitExitFullscreen).call(document);}else{await (fullscreenRoot.requestFullscreen||fullscreenRoot.webkitRequestFullscreen).call(fullscreenRoot);}fullscreenLabel();}catch{fullscreenButton.title='Fullscreen could not be opened. Tap to try again.';}};
 for(const event of ['fullscreenchange','webkitfullscreenchange'])document.addEventListener(event,fullscreenLabel);
 
-$('quality').onchange=()=>{adaptiveScale=1;frameAverage=0;adaptCount=0;};
+$('quality').onchange=()=>{adaptiveScale=1;frameAverage=0;adaptCount=0;requestQuality();};
 for(const id of ['shallows','ocean'])$(id).onclick=()=>{const ocean=id==='ocean';$('depth').value=ocean?8:1.4;$('energy').value=ocean?1.8:.8;reset=ocean?2:1;for(const p of ['shallows','ocean'])$(p).classList.toggle('active',p===id);labels();};
 addEventListener('keydown',e=>{if(gameShell?.open)return;if(shipMode&&e.code==='KeyV'&&!e.repeat&&!['INPUT','SELECT'].includes(document.activeElement.tagName))$('shipInspect').click();if(e.code==='Escape'){document.exitPointerLock?.();drag=false;held=false;forceMoved=false;flyFallback=false;lockPending=false;flyStatus('');if(!touchDevice){$('fly').textContent='Fly camera ↗';$('fly').setAttribute('aria-pressed','false');}}if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
 addEventListener('keyup',e=>keys.delete(e.code));addEventListener('blur',()=>{keys.clear();drag=false;held=false;});
@@ -153,12 +155,14 @@ function resize(){
  updateMetrics();
 }
 function qualityKernels(){return [...(mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render']),...(shipMode?['ship_step','ship_wash_pick','ship_wash_modes','ship_render','ship_mesh','ship_bounds']:[])];}
-async function ensureKernels(names){
- const missing=names.filter(name=>!kernels[name]?.loaded);if(!missing.length)return;
- await Promise.all(missing.map(name=>{
-  if(kernelLoads.has(name))return kernelLoads.get(name);
-  const promise=(async()=>{const kernel=await runtime.kernel(kernelArtifacts.get(name)),cache=new Map();kernels[name]={loaded:true,bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};diagnostics.compiledKernels=(diagnostics.compiledKernels||0)+1;})();
-  kernelLoads.set(name,promise);return promise;
+function requestQuality(){if(!gameShell||!diagnostics.ready||failed)return;const profile=$('quality').selectedOptions[0].textContent;if(!flightLoading.active&&qualityKernels().some(name=>!kernels[name]?.loaded))flightLoading.begin('profile',profile);else flightLoading.profile(profile);}
+async function ensureKernels(names,report=false){
+ const missing=[...new Set(names)].filter(name=>!kernels[name]?.loaded);if(!missing.length)return;
+ const completed=report&&gameShell?flightLoading.shaders(missing):null;
+ await Promise.all(missing.map(async name=>{
+  let promise=kernelLoads.get(name);
+  if(!promise){promise=(async()=>{const kernel=await runtime.kernel(kernelArtifacts.get(name)),cache=new Map();kernels[name]={loaded:true,bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};diagnostics.compiledKernels=(diagnostics.compiledKernels||0)+1;})();kernelLoads.set(name,promise);}
+  await promise;completed?.(name);
  }));
 }
 function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars);}
@@ -235,10 +239,18 @@ async function frame(now){
   const mobile=mobileProfile(),interval=mobile?1000/30:0;
   if(!busy&&!document.hidden&&(!gameShell?.open||menuRedraw)&&(!last||now-last>=interval-.5)){
    menuRedraw=false;
-   while(qualityKernels().some(name=>!kernels[name]?.loaded)){if(diagnostics.ready){$('loading').hidden=false;$('loadText').textContent='Preparing this quality profile…';}await ensureKernels(qualityKernels());}
+   while(qualityKernels().some(name=>!kernels[name]?.loaded)){
+    if(diagnostics.ready){$('loading').hidden=false;$('loadText').textContent='Preparing this quality profile…';if(gameShell&&!flightLoading.active)flightLoading.begin('profile',$('quality').selectedOptions[0].textContent);}
+    await ensureKernels(qualityKernels(),true);
+   }
+   if(failed)return;
+   if(flightLoading.active)flightLoading.stage('frame');
    const elapsed=last?(now-last)/1000:1/(mobile?30:60),dt=Math.min(.1,elapsed);last=now;resize();if(playing){time+=dt;if(gameShell&&!gameShell.open)playTime+=dt;}
-   const start=performance.now();compute(dt);await runtime.idle();
-   diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;const firstReady=!diagnostics.ready;diagnostics.ready=true;if(firstReady)gameShell?.ready();diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
+   const start=performance.now(),renderedQuality=$('quality').value;compute(dt);await runtime.idle();
+   if(failed)return;
+   diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;
+   if(renderedQuality===$('quality').value){const firstReady=!diagnostics.ready;diagnostics.ready=true;flightLoading.finish();if(firstReady)gameShell?.ready();$('loading').hidden=true;}else menuRedraw=true;
+   diagnostics.readbackBytes=runtime.stats.readbackBytes;
    frameAverage=frameAverage?frameAverage*.94+diagnostics.frameMs*.06:diagnostics.frameMs;
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
    if(((shipMode&&diagnostics.frames===1)||diagnostics.frames%15===0)&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];if(shipMode){diagnostics.shipAltitude=v[44];diagnostics.thrustLimit=v[3];}zoomTail=!shipMode&&Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[53]>0?v[53]:v[52])} ${v[53]>0?'elevation':'deep'} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
@@ -394,7 +406,7 @@ async function startSession(kind,saved){
  });
 }
 if(shipMode&&fixed===null){
- gameShell=createGameShell({touch:touchDevice,labels,notice:flyStatus,
+ gameShell=createGameShell({touch:touchDevice,labels,notice:flyStatus,prepareQuality:requestQuality,
   pause(){playing=false;clearGameInput();last=0;},
   resume(){clearGameInput();playing=true;last=0;canvas.focus({preventScroll:true});},
   redraw(){menuRedraw=true;weatherDirty=true;},
@@ -407,14 +419,20 @@ if(shipMode&&fixed===null){
  $('worldControls').addEventListener('click',()=>{menuRedraw=true;});
 }
 try{
+ if(gameShell)flightLoading.begin();
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
  const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','appearance_probe','celestial_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','weather_cloud_filter','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_camera_frame','terrain_cache','terrain_cache_mip','terrain_near_cache','terrain_near_coefficients','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','ship_probe','ship_effect_probe'];
- kernelArtifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
+ const downloaded=gameShell?flightLoading.stage('download',names.length):null;
+ kernelArtifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Could not download ${name} (HTTP ${response.status}). Check your connection and retry.`);const artifact=await response.json();downloaded?.();return [name,artifact];})));
  for(const name of names)kernels[name]={loaded:false,clear(){}};
  const optional=new Set(['ship_probe','ship_effect_probe','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','appearance_probe','celestial_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
  $('loadText').textContent=shipMode?'Preparing the spacecraft and planet…':'Preparing the globe and water…';
- await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()]);
+ await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()],true);
+ // Settings remain usable during startup; honor the latest profile before dispatch.
+ while(qualityKernels().some(name=>!kernels[name]?.loaded))await ensureKernels(qualityKernels(),true);
+ if(failed)throw Error('Graphics preparation stopped. Reload to try again.');
+ if(gameShell)flightLoading.stage('world');
  motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((nearTerrainOffset+8+nearTerrainWidth*nearTerrainWidth*2)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?176:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
  if(shipMode){shipMesh=runtime.createBuffer(71680*6*16);shipBounds=runtime.createBuffer((255+128*85+1024)*2*16);shipData=runtime.createBuffer(64*16);const b=runtime.batch();b.dispatch(bind('ship_mesh',{mesh:shipMesh,bounds:shipBounds}),[1120,1,1]);for(let level=0;level<=12;level++){const count=level===0?8960:level<5?128*(level===1?64:level===2?16:level===3?4:1):128>>(level-5);b.dispatch(bind('ship_bounds',{mesh:shipMesh,bounds:shipBounds},{level}),[Math.ceil(count/64),1,1]);}b.submit();diagnostics.shipTriangles=71680;}
  if(gameShell){resize();compute(0);await runtime.idle();runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([-.18,1.12,42,1]));weatherDirty=true;}

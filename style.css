@@ -70,3 +70,47 @@ aside{max-height:calc(100dvh - 150px);overflow-y:auto;scrollbar-width:thin;scrol
 .touch.game-shell.menu-open #fullscreen .fullscreen-label{display:none}
 .touch.game-shell .game-title{font-size:clamp(62px,15vw,90px)}
 @media(max-height:530px){.touch.game-shell .game-title{font-size:44px}.touch.game-shell.menu-open #fullscreen{bottom:16px}}
+
+/* Pre-flight is part of the game's interface, from the first GPU connection. */
+#gameMenu[data-screen=boot] .menu-world-caption{display:none}
+#gameMenu[data-screen=boot] .menu-body{padding-top:125px;padding-bottom:125px}
+#gameMenu[data-screen=boot] .menu-shade{background:radial-gradient(ellipse at 27% 45%,#17354870,transparent 50%),linear-gradient(110deg,#040e1ae8,#071622ef)}
+.boot-screen{width:min(1600px,100%);margin:auto;display:grid;grid-template-columns:1fr 1fr;gap:clamp(35px,6vw,115px);align-items:center}
+.departure-art{position:relative;min-width:0;isolation:isolate}
+.departure-orbit{position:absolute;inset:0 0 15%;border:1px solid #9fc0d00e;border-radius:50%;transform:rotate(-28deg) scaleX(1.15);pointer-events:none}
+.craft-schematic{display:block;width:100%;max-height:52vh;overflow:visible;filter:drop-shadow(0 0 18px #90b5c815)}
+.schematic-guides{stroke:#7294ac25;stroke-width:.8}.schematic-hull{stroke:#a8c7d4;stroke-width:1.3;stroke-linejoin:round;fill:#335d7516}.schematic-lights{stroke:#edb180;stroke-width:2;fill:#edb18019}.schematic-labels{stroke:#82a5ba66;stroke-width:.7}.schematic-labels circle{fill:#eab080;stroke:none}.schematic-labels text{fill:#91acbd;stroke:none;font:8px monospace;letter-spacing:1px}
+.schematic-caption{text-align:center;margin-top:22px}.schematic-caption>span{font:10px monospace;letter-spacing:2.5px;color:#d3a584}.schematic-caption strong{display:block;font:500 clamp(24px,2vw,36px) Manrope,sans-serif;letter-spacing:-1px;margin:12px 0;color:#c1d4de}.schematic-caption small{font:9px monospace;letter-spacing:1.5px;color:#66889e}
+.departure-panel{max-width:630px}.departure-title{font:600 clamp(40px,4.1vw,70px)/1.06 Manrope,sans-serif;letter-spacing:-2.5px;margin:0 0 34px;color:#eef0ef}.departure-title>span{color:#edb180}.departure-panel .menu-eyebrow{margin-bottom:20px}
+.flight-loading{color:#c5d6e1}.load-heading{display:flex;justify-content:space-between;align-items:center;gap:18px;font:10px monospace;letter-spacing:1.1px;color:#d5ab88}.load-heading>span:last-child{color:#8ba4b7;letter-spacing:0;white-space:nowrap;font-variant-numeric:tabular-nums}
+#loadTitle{font:500 clamp(19px,1.65vw,26px)/1.3 Manrope,sans-serif;letter-spacing:-.4px;margin:15px 0 9px;color:#e4edf0}#loadDescription{font-size:12px;line-height:1.75;color:#96b0c2;margin:0;min-height:42px;max-width:510px}
+#loadProgress{height:3px;overflow:hidden;background:#a4c1d31c;margin-top:22px}#loadProgressFill{display:block;height:100%;background:linear-gradient(90deg,#648ca7,#edb889);transform-origin:left;transition:width .2s ease-out}#loadProgress.indeterminate #loadProgressFill{background:linear-gradient(90deg,transparent,#c8dce6,transparent);animation:flight-scan 2.4s ease-in-out infinite}
+.load-count-row{display:flex;gap:10px;align-items:center;margin-top:13px;font:11px monospace;font-variant-numeric:tabular-nums;letter-spacing:.3px}.load-activity{width:5px;height:5px;background:#e3b486;border-radius:50%;box-shadow:0 0 10px #e3b48666;animation:flight-pulse 2s ease-in-out infinite}#loadPending{color:#7899af;font-size:10px;line-height:1.65;min-height:17px;margin:10px 0 0}
+.load-checklist{list-style:none;padding:0;margin:23px 0 0;border-top:1px solid #91b4c42b}.load-checklist li{display:flex;align-items:center;gap:13px;padding:12px 0;border-bottom:1px solid #91b4c415;font-size:12px;color:#66869d}.step-index{font:10px monospace;color:#58768c}.step-state{margin-left:auto;font:9px monospace;letter-spacing:1px;color:#4f6f87}.load-checklist .current{color:#e1ebf0}.load-checklist .current .step-index,.load-checklist .current .step-state{color:#efb883}.load-checklist .complete{color:#97b3c5}.load-checklist .complete .step-state{color:#8dc6ba}.load-checklist .complete .step-index{color:#8dc6ba}
+#bootSettings{margin-top:22px;min-height:44px;font-size:12px}#bootSettings span{margin-left:50px}
+.load-retry{margin-top:18px;background:#d9b392;color:#10283a;border-color:#edc7a5;min-height:44px;font-size:12px}.load-failed #loadTitle{color:#ffc99d}.load-failed #loadProgressFill,.load-failed .load-activity{background:#de917b;animation:none}.load-failed #loadDescription{color:#e1b5a9;overflow-wrap:anywhere}.load-failed .load-checklist .current .step-state{color:#f0a18a}
+.compact-loading{padding:18px 22px;margin:0 0 24px;border:1px solid #c2a08445;border-left:2px solid #d8a377;border-radius:3px;background:#102334}.compact-loading #loadTitle{font-size:18px;margin:12px 0 7px}.compact-loading #loadDescription{font-size:11px;min-height:0;max-width:none}.compact-loading #loadProgress{margin-top:15px}.compact-loading .load-checklist{display:none}.compact-loading #loadPending{margin-top:8px}.compact-loading .load-heading{font-size:9px}.compact-loading .load-count-row{font-size:10px}.systems-loading[data-screen=settings] .settings-pages{max-height:calc(56dvh - 185px);min-height:160px}
+@keyframes flight-scan{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+@keyframes flight-pulse{50%{opacity:.35}}
+@media(min-width:2100px){.departure-title{font-size:80px;margin-bottom:45px}.departure-panel{max-width:650px}.load-heading{font-size:12px}#loadTitle{font-size:29px}#loadDescription{font-size:15px;min-height:55px}.load-checklist li{padding:16px 0;font-size:14px}.load-count-row{font-size:13px}#loadPending{font-size:12px}.step-index,.step-state{font-size:11px}.schematic-caption strong{font-size:38px}.schematic-caption small{font-size:11px}#bootSettings{font-size:14px}}
+@media(max-width:1000px) and (min-width:761px){.boot-screen{gap:35px;grid-template-columns:.8fr 1fr}.departure-title{font-size:42px}.load-heading{font-size:9px;letter-spacing:.5px}.schematic-caption small{font-size:8px;letter-spacing:1px}}
+@media(max-width:760px){
+ #gameMenu[data-screen=boot] .menu-body{padding:95px 0 120px;align-items:flex-start}.boot-screen{display:flex;flex-direction:column;gap:20px;max-width:460px}.departure-art{order:1;width:210px;display:none}.departure-panel{width:100%}.departure-panel .menu-eyebrow{font-size:9px;margin-bottom:16px}.departure-title{font-size:clamp(35px,9vw,46px);letter-spacing:-1.6px;margin-bottom:30px}.load-heading{font-size:9px;letter-spacing:.5px}#loadTitle{font-size:22px;margin-top:16px}#loadDescription{font-size:12px;min-height:0}.load-checklist{margin-top:22px}.load-checklist li{font-size:12px;padding:13px 0}.load-count-row{font-size:11px}#loadPending{font-size:10px}#bootSettings{margin-top:15px}.compact-loading{padding:15px;margin-bottom:19px}.compact-loading #loadTitle{font-size:17px}.systems-loading[data-screen=settings] .settings-pages{max-height:calc(100dvh - 495px);min-height:120px}.systems-loading[data-screen=settings] .menu-body{padding-top:90px;padding-bottom:110px}.systems-loading[data-screen=settings] .settings-heading{margin-bottom:18px}
+}
+@media(max-height:600px) and (min-width:761px){
+ #gameMenu[data-screen=boot] .menu-body{padding-top:85px;padding-bottom:80px}.boot-screen{grid-template-columns:.85fr 1.3fr;gap:35px;max-width:970px}.departure-title{font-size:32px;margin-bottom:16px}.departure-title br{display:none}.departure-panel .menu-eyebrow{font-size:8px;margin-bottom:10px}.craft-schematic{max-height:50vh}.schematic-caption{margin-top:8px}.schematic-caption strong{font-size:22px;margin:7px 0}.schematic-caption small{display:none}#loadTitle{font-size:19px;margin-top:10px}#loadDescription{font-size:11px;min-height:0}#loadProgress{margin-top:12px}.load-count-row{margin-top:10px}.load-checklist{display:none}#bootSettings{margin-top:5px}.systems-loading[data-screen=settings] .menu-body{padding-top:80px}.systems-loading[data-screen=settings] .settings-pages{max-height:160px;min-height:120px}
+}
+@media(prefers-reduced-motion:reduce){#loadProgressFill,.load-activity{animation:none!important;transition:none!important}#loadProgress.indeterminate #loadProgressFill{opacity:.55;background:#c8dce6}}
+#loadPending:empty{display:none}
+@media(max-width:760px){
+ .touch.game-shell .departure-title{font-size:clamp(32px,8.3vw,42px)}
+ #gameMenu[data-screen=boot] .menu-body{padding-top:90px}.departure-panel .menu-eyebrow{margin-bottom:10px}.departure-title{margin-bottom:24px}
+ .load-checklist{margin-top:18px}.load-checklist li{padding:10px 0}#bootSettings{margin-top:7px}
+ .systems-loading[data-screen=settings] .settings-screen{height:calc(100dvh - 180px);display:flex;flex-direction:column}
+ .systems-loading[data-screen=settings] .settings-heading,.systems-loading[data-screen=settings] .settings-tabs,.systems-loading[data-screen=settings] #settingsLoading{flex-shrink:0}
+ .systems-loading[data-screen=settings] .settings-pages{flex:1;max-height:none;min-height:90px}
+}
+@media(max-width:760px) and (max-height:740px){
+ .departure-title{margin-bottom:20px}.load-checklist{margin-top:14px}.load-checklist li{padding:8px 0;font-size:11px}#loadProgress{margin-top:15px}.load-count-row{margin-top:11px}#loadDescription{font-size:11px}#loadTitle{font-size:20px;margin-top:13px}.departure-panel .menu-eyebrow{font-size:8px}
+ .compact-loading{padding:13px 15px;margin-bottom:12px}.compact-loading #loadTitle{font-size:16px}.compact-loading #loadPending{font-size:9px}
+}

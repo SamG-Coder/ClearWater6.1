@@ -28,6 +28,7 @@ jobs:
         run: |
           node --check app.js
           node --check game-shell.js
+          node --check flight-loading.js
           node --check scripts/build.mjs
           node --check scripts/serve.mjs
           node --check scripts/verify.mjs
@@ -48,6 +49,7 @@ jobs:
           node --check scripts/shoreline-verify.mjs
           node --check scripts/horizon-verify.mjs
           node --check scripts/menu-verify.mjs
+          node --check scripts/loading-verify.mjs
       - name: Compile CUDA kernels and build static site
         run: npm run build
       - uses: actions/upload-pages-artifact@v4
