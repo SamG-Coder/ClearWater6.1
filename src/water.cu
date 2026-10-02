@@ -290,7 +290,13 @@ __global__ void camera_step(float4 *camera,float2 *navigationState,float dt,floa
  double nav6=(double)navigationState[6].x+(double)navigationState[6].y;
  double nav7=(double)navigationState[7].x+(double)navigationState[7].y;
  float4 p=camera[0],r=camera[1];
- if(reset>0){
+ if(reset==3&&camera[8].z>0){
+  // Space is a radial move above the observer, not a geographic reset. Keep
+  // the transported frame and precise navigation so local solar time, weather
+  // and the land beneath us agree with the surface after any speed of flight.
+  p.y=earth_radius()*1.25f;r=make_float4(r.x,-1.5707963f,0,0);
+ }else if(reset>0){
+  // Also handles Space selected before the first camera frame is initialized.
   p=reset==2?make_float4(0,8,16,0):make_float4(0,2.6f,4,0);
   if(reset==3)p=make_float4(0,earth_radius()*1.25f,4,0);
   r=make_float4(0,reset==3?-1.5707963f:(reset==2?-.4f:-.32f),0,0);

@@ -137,12 +137,14 @@ The ocean now wraps an analytic sphere with a radius of 6,371,000 metres (diamet
 - WASD flies; Q/E descend and rise relative to the current planetary surface. Shift boosts speed.
 - With the mouse free, wheel-out smoothly retreats toward space and wheel-in approaches the water. Travel speed grows with altitude.
 - Click Fly camera for mouse lock. In this mode, wheel-up increases flight speed and wheel-down reduces it without changing altitude. Escape releases the mouse.
-- The Space preset frames the entire globe. Shallows or Reset returns to the surface.
+- Space rises above your current location and frames the globe, preserving longitude, latitude, heading and local solar time after flight. Shallows or Reset visits a surface preset.
 - On touch devices, pinch inward to retreat and spread two fingers to approach. The movement joystick, altitude buttons and screen-drag look remain available. Pinching never pushes the water.
 
 The camera follows great-circle steps and transports its local frame across poles. A single CUDA invocation uses software double arithmetic, stored as high/low float pairs; a small double polynomial rotation avoids the accumulated error of native shader trigonometry. Rendering stays float32 and camera-relative, with altitude separate from the 6,371 km radius. The FFT/material chart remains bounded for close-up precision; it is a local procedural detail layer, not a globally persistent terrain map. There is no planet-sized FFT allocation. A 256-byte telemetry read every 15 frames updates altitude, speed and local weather labels independently of rendering.
 
 `npm run test:planet` checks spherical ray intersections against independent JavaScript double equations, an entire Earth circuit, metre-scale movement on the far side, pole crossing, actual wheel input, flight-speed adjustment, touch pinch input, and real 1440p/4K space framebuffers. It also saves views from orbital height down to the shallow water. The atmosphere and cloud layer are visual approximations. Browser tests use local NVIDIA/Edge and Chromium phone emulation; physical Samsung and Safari behaviour still requires device testing.
+
+`npm run test:lighting` checks fast travel between day and night, local sunlight against an independent Earth-fixed Sun calculation, and preservation of position and local time through Space, wheel zoom, and descent. It covers oblique high-speed flight, the continent profile, desktop and emulated touch controls, and actual 1440p/4K output. The regression catches the former Space reset that returned to the starting longitude after travel.
 
 The Earth-scale release resets the image/shader optimization baseline to `812431b`. This accepts the requested spherical renderer and preserves its new Mobile/Performance imagery for subsequent optimization work.
 
