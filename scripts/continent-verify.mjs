@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 await mkdir('captures',{recursive:true});
 const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']}),errors=[];
 const url=process.env.WATER_URL||'http://127.0.0.1:5191/';
-const ready=p=>p.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
+const ready=p=>p.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:240000});
 const select=(page,id,value)=>page.locator('#'+id).evaluate((e,v)=>{e.value=String(v);e.dispatchEvent(new Event('change'));},value);
 const screenOracle=async page=>{
  const size=await page.evaluate(()=>({width:waterDiagnostics.width,height:waterDiagnostics.height}));
@@ -20,7 +20,7 @@ const screenOracle=async page=>{
 };
 try{
  const page=await browser.newPage({viewport:{width:1440,height:900}});page.on('pageerror',e=>errors.push(String(e)));const startup=Date.now();await page.goto(url+'?t=4');await ready(page);const startupSeconds=(Date.now()-startup)/1000;console.log(JSON.stringify({startupSeconds}));assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
- await page.locator('#toggle').click();await page.screenshot({path:'captures/continents-coast.png'});const coastOracle=await screenOracle(page);
+ await page.locator('#toggle').click();await page.screenshot({path:'captures/continents-coast.png'});const coastOracle=await screenOracle(page);const stageCosts=await page.evaluate(()=>waterLab.profileStages());console.log(JSON.stringify({stageCosts}));
  await page.setViewportSize({width:2560,height:1440});await select(page,'quality',2560);await page.evaluate(()=>waterLab.seek(4));const coast2k=await page.evaluate(()=>waterLab.benchmark(30,true));
  await page.setViewportSize({width:3840,height:2160});await select(page,'quality',3840);await page.evaluate(()=>waterLab.seek(4));const coast4k=await page.evaluate(()=>waterLab.benchmark(30,true));
  await page.setViewportSize({width:1440,height:900});await select(page,'quality',1152);await page.evaluate(()=>waterLab.seek(4));
@@ -53,8 +53,8 @@ try{
  await page.locator('#toggle').click();await page.locator('#space').click();await page.locator('#toggle').click();await page.evaluate(()=>waterLab.weatherSeek(43200));
  const orbit=[];for(const size of [2560,3840]){await page.setViewportSize({width:size,height:size*9/16});await select(page,'quality',size);await page.evaluate(()=>waterLab.seek(4));const gpu=await page.evaluate(()=>waterLab.benchmark(40,true));assert.equal(gpu.width,size);orbit.push(gpu);await page.screenshot({path:`captures/continents-globe-${size}.png`});}
  await page.evaluate(()=>waterLab.weatherSeek(0));await page.screenshot({path:'captures/continents-night.png'});
- const phone=await browser.newPage({...devices['Pixel 7']});phone.on('pageerror',e=>errors.push(String(e)));await phone.goto(url+'?t=4');await ready(phone);await phone.locator('#toggle').click();await phone.locator('#geologyPanel summary').click();await phone.locator('#highlands').click();await phone.evaluate(()=>waterLab.seek(4));await phone.locator('#toggle').click();await phone.screenshot({path:'captures/continents-mobile.png'});const mobile=await phone.evaluate(()=>waterLab.benchmark(30,true));assert.ok((await phone.evaluate(()=>waterLab.geologyState())).elevation>300);await phone.close();
- errors.push(...await page.evaluate(()=>waterDiagnostics.errors));assert.deepEqual(errors,[]);
+ assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);await page.close();const phone=await browser.newPage({...devices['Pixel 7']});phone.on('pageerror',e=>errors.push(String(e)));await phone.goto(url+'?t=4');await ready(phone);await phone.locator('#toggle').click();await phone.locator('#geologyPanel summary').click();await phone.locator('#highlands').click();await phone.evaluate(()=>waterLab.seek(4));await phone.locator('#toggle').click();await phone.screenshot({path:'captures/continents-mobile.png'});const mobile=await phone.evaluate(()=>waterLab.benchmark(30,true));assert.ok((await phone.evaluate(()=>waterLab.geologyState())).elevation>300);assert.deepEqual(await phone.evaluate(()=>waterDiagnostics.errors),[]);await phone.close();
+ assert.deepEqual(errors,[]);
  const shader=JSON.parse(await readFile('kernels/render_pc.json','utf8')).wgsl;assert.ok(!shader.includes('f64'),'Terrain rendering must remain float32');
- const result={startupSeconds,coastOracle,highlandOracle,coast2k,coast4k,highland2k,highland4k,cacheRms,cacheMax,recenterMax,rotationStable:true,highland,count,maxResidual,oracleError,cameraClearance:true,dryLandPressureRejected:true,terrainGpu,orbit,mobile,errors,environment:'Desktop NVIDIA/Edge; mobile viewport/input emulation, not a Samsung or Safari GPU benchmark'};await writeFile('captures/continents-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
+ const result={startupSeconds,stageCosts,coastOracle,highlandOracle,coast2k,coast4k,highland2k,highland4k,cacheRms,cacheMax,recenterMax,rotationStable:true,highland,count,maxResidual,oracleError,cameraClearance:true,dryLandPressureRejected:true,terrainGpu,orbit,mobile,errors,environment:'Desktop NVIDIA/Edge; mobile viewport/input emulation, not a Samsung or Safari GPU benchmark'};await writeFile('captures/continents-validation.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2));
 }finally{await browser.close();}

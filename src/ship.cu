@@ -31,10 +31,10 @@ __device__ ShipPart ship_component(int id){
   if(id==16){p.shape=2;p.size=vec(.49f,.49f,1.1f);p.centre=vec(0,-.14f,5.25f);p.material=2;}
   if(id==17){p.shape=3;p.size=vec(.40f,.05f,.7f);p.centre=vec(0,-.14f,5.98f);p.material=6;}
   if(id==18){p.shape=4;p.size=vec(.30f,.27f,.015f);p.centre=vec(0,-.14f,5.85f);p.material=6;}
-  if(id==19){p.size=vec(.17f,.08f,.10f);p.centre=vec(0,.28f,-5.6f);p.material=3;}
+  if(id==19){p.size=vec(.17f,.08f,.10f);p.centre=vec(0,.28f,-5.6f);p.material=10;}
   if(id>=20&&id<24){float s=(id%2)==0?-1:1;p.size=vec(.045f,.05f,.72f);p.centre=vec(s*.89f,.78f,-1.2f-(float)(id/2-10)*1.22f);p.material=2;}
   if(id>=24&&id<28){float s=(id%2)==0?-1:1;p.size=vec(.42f,.035f,.47f);p.centre=vec(s*.88f,.70f,-.05f+(float)(id/2-12)*1.22f);p.material=id<26?0:1;}
-  if(id==28||id==29){p.size=vec(.095f,.045f,1.5f);p.centre=vec(id==28?-.70f:.70f,.22f,-3.7f);p.rotation.z=id==28?-.1f:.1f;p.material=2;}
+  if(id==28||id==29){p.size=vec(.095f,.045f,1.5f);p.centre=vec(id==28?-.70f:.70f,.22f,-3.7f);p.rotation.z=id==28?-.1f:.1f;p.material=10;}
   if(id==30){p.size=vec(.38f,.035f,.52f);p.centre=vec(0,.42f,-4.25f);p.rotation.x=-.20f;p.material=0;}
   if(id==31){p.size=vec(.10f,.055f,.37f);p.centre=vec(0,.49f,-4.26f);p.rotation.x=-.20f;p.material=1;}
  }else{
@@ -131,6 +131,33 @@ __device__ float2 ship_spring(float position,float velocity,float target,float f
  float error=position-target,j=velocity+frequency*error,decay=expf(-frequency*dt);
  return make_float2(target+(error+j*dt)*decay,(velocity-frequency*j*dt)*decay);
 }
+// Above the atmosphere, advance a Cartesian displacement instead of rotating
+// around a constant-radius shell. Only this one navigation invocation needs
+// double precision. The near-surface flight assistant fades out continuously.
+__device__ void ship_space_advance(float4 *camera,float2 *navigationState,float3 travel,float dt,float freeFlight){
+ double nx=(double)navigationState[0].x+(double)navigationState[0].y,ny=(double)navigationState[1].x+(double)navigationState[1].y,nz=(double)navigationState[2].x+(double)navigationState[2].y;
+ double ex=(double)navigationState[3].x+(double)navigationState[3].y,ey=(double)navigationState[4].x+(double)navigationState[4].y,ez=(double)navigationState[5].x+(double)navigationState[5].y;
+ double bx=ey*nz-ez*ny,by=ez*nx-ex*nz,bz=ex*ny-ey*nx;
+ double dx=(double)travel.x*(double)dt,dy=(double)travel.y*(double)dt,dz=(double)travel.z*(double)dt,r=6371000.0+(double)camera[0].y;
+ double x=nx*(r+dy)+ex*dx+bx*dz,y=ny*(r+dy)+ey*dx+by*dz,z=nz*(r+dy)+ez*dx+bz*dz;
+ double radius=sqrt(x*x+y*y+z*z);x/=radius;y/=radius;z/=radius;
+ double along=(ex*x+ey*y+ez*z)/(1.0+nx*x+ny*y+nz*z);ex-=along*(nx+x);ey-=along*(ny+y);ez-=along*(nz+z);
+ double inv=1.0/sqrt(ex*ex+ey*ey+ez*ez);ex*=inv;ey*=inv;ez*=inv;
+ double u=(double)navigationState[6].x+(double)navigationState[6].y+dx,v=(double)navigationState[7].x+(double)navigationState[7].y+dz;
+ camera[0].x=(float)(u-(double)floorf((float)((u+3072.0)/6144.0))*6144.0);camera[0].z=(float)(v-(double)floorf((float)((v+3072.0)/6144.0))*6144.0);
+ camera[0].y=fmaxf(6,mixf((float)(r+dy-6371000.0),(float)(radius-6371000.0),freeFlight));
+ camera[5]=make_float4((float)ex,(float)ey,(float)ez,0);camera[6]=make_float4((float)x,(float)y,(float)z,0);camera[7]=make_float4((float)(ey*z-ez*y),(float)(ez*x-ex*z),(float)(ex*y-ey*x),0);
+ {float hi=(float)x;navigationState[0]=make_float2(hi,(float)(x-(double)hi));}
+ {float hi=(float)y;navigationState[1]=make_float2(hi,(float)(y-(double)hi));}
+ {float hi=(float)z;navigationState[2]=make_float2(hi,(float)(z-(double)hi));}
+ {float hi=(float)ex;navigationState[3]=make_float2(hi,(float)(ex-(double)hi));}
+ {float hi=(float)ey;navigationState[4]=make_float2(hi,(float)(ey-(double)hi));}
+ {float hi=(float)ez;navigationState[5]=make_float2(hi,(float)(ez-(double)hi));}
+ {float hi=(float)u;navigationState[6]=make_float2(hi,(float)(u-(double)hi));}
+ {float hi=(float)v;navigationState[7]=make_float2(hi,(float)(v-(double)hi));}
+}
+__device__ float3 ship_local(const float4 *camera,float3 p){return vec(dotv(p,ship_xyz(camera[5])),dotv(p,ship_xyz(camera[6])),dotv(p,ship_xyz(camera[7])));}
+__device__ float3 ship_heading(float yaw,float pitch){return vec(sinf(yaw)*cosf(pitch),sinf(pitch),-cosf(yaw)*cosf(pitch));}
 __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,float deltaTime,float forward,float turn,float rise,float lookX,float lookY,float speed,int boost,int action,int inspect,float depth,float aspect){
  float dt=fminf(.1f,fmaxf(0,deltaTime));
  if(ship[0].w==0||action==1){
@@ -138,11 +165,24 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
   ship[0]=make_float4(camera[0].x,22,camera[0].z,1);ship[1]=make_float4(0,0,0,0);ship[2]=make_float4(.34f,.30f,22,0);ship[3]=make_float4(0,.16f,0,speed);
   ship[8]=make_float4(0,0,0,0);ship[9]=make_float4(0,0,0,0);ship[10]=make_float4(0,0,22,0);
  }
+ // Navigation belongs to the ship; rendering belongs to the chase eye. Restore
+ // the ship frame before integrating controls, rather than integrating in last
+ // frame's offset camera frame (which would steer the planet as we orbit).
+ float3 navN=unit(vec(navigationState[0].x,navigationState[1].x,navigationState[2].x)),navE=unit(vec(navigationState[3].x,navigationState[4].x,navigationState[5].x)),navB=crossv(navE,navN);
+ camera[5]=make_float4(navE.x,navE.y,navE.z,camera[5].w);camera[6]=make_float4(navN.x,navN.y,navN.z,0);camera[7]=make_float4(navB.x,navB.y,navB.z,camera[7].w);
  if(action==3){ship[0].y=earth_radius()*.70f;ship[1].y=-.40f;ship[2].y=.72f;ship[2].x=.32f;ship[8]=make_float4(ship[1].x,-.40f,0,0);ship[9]=make_float4(0,0,0,0);ship[10].x=ship[1].x;ship[10].y=-.40f;}
+ if(action==4){
+  float3 moon=moon_position(camera),sun=unit(ship_xyz(camera[12])),side=unit(crossv(sun,vec(0,1,0))),out=unit(plus(scale(sun,.65f),scale(side,.76f)));
+  float3 point=plus(moon,scale(out,6800000)),normal=unit(point),east=unit(crossv(vec(0,1,0),normal)),back=crossv(east,normal);
+  navigationState[0]=make_float2(normal.x,0);navigationState[1]=make_float2(normal.y,0);navigationState[2]=make_float2(normal.z,0);navigationState[3]=make_float2(east.x,0);navigationState[4]=make_float2(east.y,0);navigationState[5]=make_float2(east.z,0);navigationState[6]=make_float2(0,0);navigationState[7]=make_float2(0,0);
+  camera[5]=make_float4(east.x,east.y,east.z,0);camera[6]=make_float4(normal.x,normal.y,normal.z,0);camera[7]=make_float4(back.x,back.y,back.z,moon.x);
+  float3 local=ship_local(camera,scale(out,-1));float yaw=atan2f(local.x,-local.z),pitch=atan2f(local.y,sqrtf(local.x*local.x+local.z*local.z));
+  ship[0]=make_float4(0,sqrtf(dotv(point,point))-earth_radius(),0,1);ship[1]=make_float4(yaw,pitch,0,0);ship[2]=make_float4(0,.10f,22,0);ship[8]=make_float4(yaw,pitch,0,0);ship[9]=make_float4(0,0,0,0);ship[10]=make_float4(yaw,pitch,22,0);
+ }
  float4 pose=ship[1];ship[2].w=(float)inspect;
  if(inspect!=0){ship[2].x+=lookX;ship[2].y=fminf(1.30f,fmaxf(-.15f,ship[2].y-lookY));ship[8]=make_float4(pose.x,pose.y,0,0);}
  else{
-  ship[8].x=ship_angle(ship[8].x+lookX+turn*dt*1.12f);ship[8].y=fminf(1.45f,fmaxf(-1.45f,ship[8].y+lookY));
+  ship[8].x=ship_angle(ship[8].x+lookX+turn*dt*1.12f);float pitchLimit=mixf(1.45f,1.5707f,eased(12000,80000,ship[0].y));ship[8].y=fminf(pitchLimit,fmaxf(-pitchLimit,ship[8].y+lookY));
   // Paused inspection/diagnostic edits should still respond to mouse input.
   if(dt==0&&(lookX!=0||lookY!=0)){pose.x=ship[8].x;pose.y=ship[8].y;ship[8].z=0;ship[8].w=0;}
   if(forward>0||fabsf(turn)>.01f||fabsf(lookX)>.001f)ship[2].x*=expf(-dt*4);
@@ -153,14 +193,24 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
   pose.x=ship_angle(yaw.x);pose.y=pitch.x;ship[8].z=yaw.y;ship[8].w=pitch.y;
  }
  float targetBank=inspect==0?fminf(.62f,fmaxf(-.62f,-ship[8].z*.48f)):0;pose.z=mixf(pose.z,targetBank,1-expf(-dt*7));
+ float freeFlight=eased(12000,80000,ship[0].y);
  float maxSpeed=fminf(30000000,speed*fmaxf(1,ship[0].y*.006f)*(boost!=0?6:1)),target=fmaxf(0,forward)*maxSpeed;
- pose.w=mixf(pose.w,target,1-expf(-dt*(forward<0?7:forward>0?2.8f:.48f)));if(pose.w<.002f)pose.w=0;
+ pose.w=mixf(pose.w,target,1-expf(-dt*(forward<0?7:forward>0?2.8f:.48f*(1-freeFlight))));if(pose.w<.002f)pose.w=0;
  float3 nose=vec(sinf(pose.x)*cosf(pose.y),sinf(pose.y),-cosf(pose.x)*cosf(pose.y));
- float3 previous=ship_xyz(ship[9]),desired=plus(scale(nose,pose.w),vec(0,rise*maxSpeed*.35f,0));
+ float3 lift=blend(vec(0,1,0),vec(-sinf(pose.x)*sinf(pose.y),cosf(pose.y),cosf(pose.x)*sinf(pose.y)),freeFlight);
+ float3 previous=ship_xyz(ship[9]),desired=plus(scale(nose,pose.w),scale(lift,rise*maxSpeed*.35f));
  float3 velocity=blend(previous,desired,1-expf(-dt*(forward<0?10:6))),travel=scale(plus(previous,velocity),.5f);
  float actual=sqrtf(dotv(travel,travel)),factor=fmaxf(1,ship[0].y*.06f);
  camera[0]=make_float4(ship[0].x,ship[0].y,ship[0].z,0);camera[1]=make_float4(0,0,0,0);
- camera_advance(camera,navigationState,dt,actual>0?-travel.z/actual:0,actual>0?travel.x/actual:0,actual>0?travel.y/actual:0,0,0,actual/factor,0,0,depth);
+ if(freeFlight>0&&actual>0&&dt>0){
+  float3 worldNose=to_world(camera,nose),worldTarget=to_world(camera,ship_heading(ship[8].x,ship[8].y)),worldChase=to_world(camera,ship_heading(ship[10].x,ship[10].y)),worldVelocity=to_world(camera,velocity);
+  ship_space_advance(camera,navigationState,travel,dt,freeFlight);
+  float3 local=ship_local(camera,worldNose),aim=ship_local(camera,worldTarget),chase=ship_local(camera,worldChase);
+  pose.x=ship_angle(pose.x+ship_angle(atan2f(local.x,-local.z)-pose.x)*freeFlight);pose.y=mixf(pose.y,atan2f(local.y,sqrtf(local.x*local.x+local.z*local.z)),freeFlight);
+  ship[8].x=ship_angle(ship[8].x+ship_angle(atan2f(aim.x,-aim.z)-ship[8].x)*freeFlight);ship[8].y=mixf(ship[8].y,atan2f(aim.y,sqrtf(aim.x*aim.x+aim.z*aim.z)),freeFlight);
+  ship[10].x=ship_angle(ship[10].x+ship_angle(atan2f(chase.x,-chase.z)-ship[10].x)*freeFlight);ship[10].y=mixf(ship[10].y,atan2f(chase.y,sqrtf(chase.x*chase.x+chase.z*chase.z)),freeFlight);
+  velocity=blend(velocity,ship_local(camera,worldVelocity),freeFlight);
+ }else camera_advance(camera,navigationState,dt,actual>0?-travel.z/actual:0,actual>0?travel.x/actual:0,actual>0?travel.y/actual:0,0,0,actual/factor,0,0,depth);
  float floorHeight=camera[21].w!=0?terrain_height(camera,ship_xyz(camera[6])):0;camera[0].y=fmaxf(camera[0].y,fmaxf(6,floorHeight+6));
  if(camera[0].y<=fmaxf(6,floorHeight+6)+.001f)velocity.y=fmaxf(0,velocity.y);
  ship[9]=make_float4(velocity.x,velocity.y,velocity.z,sqrtf(dotv(velocity,velocity)));
@@ -181,9 +231,23 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  // float32 orbital altitudes would quantize the canopy and tracking camera.
  offset.y=fmaxf(offset.y,floorHeight+2-ship[0].y);
  float3 viewUp=unit(plus(cameraUp,scale(cameraRight,sinf(pose.z)*.12f))),eye=plus(ship_xyz(ship[0]),offset),f=unit(minus(vec(0,.50f,0),offset)),r=unit(crossv(f,viewUp)),u=crossv(r,f);
- camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[1]=make_float4(pose.x,pose.y,0,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=ship[9].w;
  float3 localEye=ship_inverse(ship,offset);ship[7]=make_float4(localEye.x,localEye.y,localEye.z,0);
- camera[19].x=ship[0].y;camera[19].y=ship[9].w;
+ // All world rays must start at the actual eye, including shoreline traces.
+ // Parallel transport the frame to that eye without changing the ship's
+ // precise navigation state or its small, unquantized model-to-eye transform.
+ float3 oldN=ship_xyz(camera[6]),oldE=ship_xyz(camera[5]);
+ double cnx=(double)navigationState[0].x+(double)navigationState[0].y,cny=(double)navigationState[1].x+(double)navigationState[1].y,cnz=(double)navigationState[2].x+(double)navigationState[2].y;
+ double cex=(double)navigationState[3].x+(double)navigationState[3].y,cey=(double)navigationState[4].x+(double)navigationState[4].y,cez=(double)navigationState[5].x+(double)navigationState[5].y,cr=6371000.0+(double)ship[0].y+(double)offset.y;
+ double cx=cnx*cr+cex*(double)offset.x+(cey*cnz-cez*cny)*(double)offset.z,cy=cny*cr+cey*(double)offset.x+(cez*cnx-cex*cnz)*(double)offset.z,cz=cnz*cr+cez*(double)offset.x+(cex*cny-cey*cnx)*(double)offset.z;
+ double eyeRadius=sqrt(cx*cx+cy*cy+cz*cz);float3 eyeN=vec((float)(cx/eyeRadius),(float)(cy/eyeRadius),(float)(cz/eyeRadius));
+ float3 eyeE=unit(minus(oldE,scale(plus(oldN,eyeN),dotv(oldE,eyeN)/(1+dotv(oldN,eyeN))))),eyeB=crossv(eyeE,eyeN);
+ float3 wf=to_world(camera,f),wr=to_world(camera,r),wu=to_world(camera,u),sr=to_world(camera,bankRight),su=to_world(camera,bankUp),sb=to_world(camera,back);
+ camera[5]=make_float4(eyeE.x,eyeE.y,eyeE.z,camera[5].w);camera[6]=make_float4(eyeN.x,eyeN.y,eyeN.z,0);camera[7]=make_float4(eyeB.x,eyeB.y,eyeB.z,camera[7].w);
+ f=ship_local(camera,wf);r=ship_local(camera,wr);u=ship_local(camera,wu);sr=ship_local(camera,sr);su=ship_local(camera,su);sb=ship_local(camera,sb);
+ ship[4]=make_float4(sr.x,sr.y,sr.z,0);ship[5]=make_float4(su.x,su.y,su.z,0);ship[6]=make_float4(sb.x,sb.y,sb.z,0);
+ eye.y=(float)(eyeRadius-6371000.0);
+ camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[1]=make_float4(pose.x,pose.y,0,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=ship[9].w;
+ camera[19].x=ship[0].y;camera[19].y=ship[9].w;camera[19].z=1;
 }
 // Two vectored lift jets create pressure at their actual sea-plane footprints.
 // brush[3] holds the moving-domain shift, clear flag and combined strength;
@@ -196,9 +260,15 @@ __global__ void ship_wash_pick(const float4 *camera,const float4 *ship,float4 *b
   float height=engine.y,hit=height/fmaxf(.2f,-jet.y),x=engine.x+jet.x*hit,z=engine.z+jet.z*hit;
   float nearWater=1-eased(5,28,height),strength=nearWater*nearWater*(.42f+.58f*ship[3].y)*eased(.2f,.65f,-jet.y)*(1-eased(100,300,ship[9].w));
   if(height<0||height>=28||jet.y>=-.2f)strength=0;
-  if(strength>0&&camera[21].w!=0){float3 normal=to_world(camera,unit(vec(x-ship[0].x,earth_radius(),z-ship[0].z)));if(terrain_height(camera,normal)>-.12f)strength=0;}
+  if(strength>0&&camera[21].w!=0){float3 normal=to_world(camera,unit(vec(x-camera[0].x,earth_radius(),z-camera[0].z)));if(terrain_height(camera,normal)>-.12f)strength=0;}
   brush[4+i]=make_float4(x,z,.65f+fminf(28,fmaxf(0,height))*.075f,strength);
+  float3 nozzle=plus(ship_xyz(ship[0]),ship_axis(ship,vec(i==0?-4.65f:4.65f,.22f,5.3f)));
+  brush[6+i]=make_float4(nozzle.x,nozzle.y,nozzle.z,16+ship[3].y*65);
+  float night=1-eased(-.04f,.18f,camera[9].y);
+  float3 lamp=plus(ship_xyz(ship[0]),ship_axis(ship,vec(i==0?-.70f:.70f,.22f,-4.8f)));
+  brush[8+i]=make_float4(lamp.x,lamp.y,lamp.z,night*160);
  }
+ float3 lampDirection=ship_axis(ship,unit(vec(0,-.62f,-1)));brush[10]=make_float4(lampDirection.x,lampDirection.y,lampDirection.z,ship[3].x);
  float strength=brush[4].w+brush[5].w;
  if(strength>.0001f){
   float x=(brush[4].x+brush[5].x)*.5f,z=(brush[4].y+brush[5].y)*.5f,dx=x-old.x,dz=z-old.y;
@@ -221,7 +291,7 @@ __global__ void ship_wash_modes(float4 *disturbance,const float4 *brush,const fl
  if(dt>0)for(int i=0;i<2;i++){
   float4 engine=brush[4+i];float radius2=engine.z*engine.z;
   float pulse=.86f+.10f*sinf(ship[3].x*8+(float)i*1.7f)+.04f*sinf(ship[3].x*13-(float)i);
-  float amplitude=-.62f*engine.w*pulse*6.2831853f*radius2/576*expf(-kk*radius2*.5f);
+  float amplitude=-.90f*engine.w*pulse*6.2831853f*radius2/576*expf(-kk*radius2*.5f);
   float p=kx*(engine.x-brush[2].x)+kz*(engine.y-brush[2].y);targetRe+=amplitude*cosf(p);targetIm-=amplitude*sinf(p);
  }
  float omega=motion[32768+idx],co=cosf(omega*dt),si=sinf(omega*dt),decay=expf(-(.55f+motion[65536+idx])*dt-sqrtf(shift.x*shift.x+shift.y*shift.y)/8);
@@ -269,6 +339,27 @@ __device__ float ship_serial(float x,float y,float footprint){
  if(digit==0)mark=fmaxf(mark,fmaxf(ship_line(u-.08f,.024f,footprint),fmaxf(ship_line(v-.04f,.024f,footprint),ship_line(v-.58f,.024f,footprint)))*eased(.035f,.065f,u)*(1-eased(.345f,.37f,u)));
  return clamp01(mark);
 }
+// Finite local emitters put real blue spill on exhaust rims and nearby panels.
+// Navigation lamps and landing strips remain readable on the night side.
+__device__ float3 ship_local_light(float3 p,float3 n,float3 view,float3 albedo,const float4 *camera,const float4 *ship){
+ float3 radiance=vec(0,0,0);float night=1-eased(-.04f,.18f,camera[9].y);
+ for(int i=0;i<6;i++){
+  float side=(i%2)==0?-1:1;float3 position=i<2?vec(side*4.65f,.22f,5.5f):i<4?vec(side*6.68f,.24f,1.35f):vec(side*.70f,.36f,-3.7f);
+  float3 hue=i<2?vec(.045f,.30f,1):i<4?((i%2)==0?vec(1,.025f,.008f):vec(.025f,1,.22f)):vec(.62f,.80f,1);
+  float power=i<2?8+ship[3].y*28:i<4?1.3f:night*2.5f;
+  float3 delta=minus(position,p);float d2=dotv(delta,delta);if(d2>144)continue;float3 l=unit(delta),halfv=unit(plus(l,view));
+  float diffuse=fmaxf(0,dotv(n,l)),spec=positive_power(fmaxf(0,dotv(n,halfv)),48)*.65f;
+  float attenuation=power/(1+d2)*eased(144,81,d2);
+  radiance=plus(radiance,scale(vec(hue.x*(albedo.x*diffuse+spec),hue.y*(albedo.y*diffuse+spec),hue.z*(albedo.z*diffuse+spec)),attenuation));
+ }
+ return radiance;
+}
+__global__ void ship_effect_probe(const float4 *camera,const float4 *ship,const float4 *brush,const float4 *points,float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 color=vec(0,0,0);
+ if(p.w==0)color=craft_water(color,vec(p.x,p.y,p.z),vec(0,1,0),unit(vec(.1f,-1,.1f)),camera,brush);
+ else color=ship_local_light(vec(p.x,p.y,p.z),vec(0,0,1),vec(0,0,1),vec(.5f,.5f,.5f),camera,ship);
+ output[i]=make_float4(color.x,color.y,color.z,1);
+}
 __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const float4 *camera,const float4 *ship,ShipHit hit,float3 ray,float footprint,float knownShadow){
  int tri=hit.triangle,mat=(int)bounds[ship_node_base(hit.part)*2].w;float w=1-hit.u-hit.v;
  float3 n=unit(plus(scale(ship_xyz(mesh[tri*6+3]),w),plus(scale(ship_xyz(mesh[tri*6+4]),hit.u),scale(ship_xyz(mesh[tri*6+5]),hit.v))));if(dotv(n,ray)>0)n=scale(n,-1);
@@ -283,6 +374,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  if(mat==7){color=vec(1,.045f,.01f);emission=3;}
  if(mat==8){color=vec(.08f,1,.50f);emission=3;}
  if(mat==9){color=vec(.014f,.025f,.028f);rough=.65f;metal=.1f;if(hit.part==5&&n.y>.2f){color=vec(.015f,.17f,.22f);emission=1;}}
+ if(mat==10){color=vec(.55f,.78f,1);emission=.1f+4*(1-eased(-.04f,.18f,camera[9].y));rough=.18f;}
  // Metre-scale panel seams, recessed fasteners, warning chevrons and paint
  // wear are filtered by the projected pixel footprint, not repeating noise.
  float fp=fmaxf(.002f,footprint),seam=0,rivet=0;
@@ -311,7 +403,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  if(mat==2&&hit.part>31){float band=ship_line(fract(p.z*6)-.5f,.08f,fp*6);color=blend(color,vec(.12f,.14f,.16f),band*.5f);}
  float3 light=unit(ship_inverse(ship,ship_xyz(camera[9]))),view=scale(ray,-1),halfv=unit(plus(light,view));float nl=fmaxf(0,dotv(n,light)),nv=fmaxf(.02f,dotv(n,view)),nh=fmaxf(0,dotv(n,halfv)),vh=fmaxf(0,dotv(view,halfv));
  float shadow=knownShadow;if(shadow<0){shadow=1;if(nl>.001f){ShipHit occ=ship_trace(mesh,bounds,plus(p,scale(n,.006f)),light,1);if(occ.triangle>=0)shadow=.08f;}}
- float3 worldN=ship_axis(ship,n),reflected=ship_axis(ship,minus(ray,scale(n,2*dotv(ray,n))));float day=eased(-.10f,.22f,camera[9].y),atmosphere=1-eased(15000,130000,camera[0].y);
+ float3 worldN=ship_axis(ship,n),reflected=ship_axis(ship,minus(ray,scale(n,2*dotv(ray,n))));float atmosphere=1-eased(15000,130000,camera[0].y),day=mixf(globe_hit(ship[0].y,ship_xyz(camera[9]))>0?0:1,eased(-.10f,.22f,camera[9].y),atmosphere);
  float3 ambient=blend(vec(.016f,.025f,.035f),vec(.12f,.19f,.27f),clamp01(worldN.y*.5f+.5f));ambient=scale(ambient,(.05f+day)*atmosphere+.035f);
  float3 env=blend(vec(.018f,.035f,.045f),vec(.13f,.26f,.43f),eased(-.2f,.8f,reflected.y));env=scale(env,(.02f+day)*atmosphere+.035f);
  if(mat==3&&camera[0].y<400)env=scale(weather_sky_sample(reflected,camera),1.8f);
@@ -321,6 +413,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  float3 indirect=vec(color.x*ambient.x,color.y*ambient.y,color.z*ambient.z);if(mat==3){float frame=ship_line(u-.125f,.002f,.003f)+ship_line(u-.375f,.002f,.003f);indirect=plus(indirect,scale(vec(.03f,.09f,.13f),1-clamp01(frame)));}float3 reflection=vec(env.x*F.x,env.y*F.y,env.z*F.z);reflection=scale(reflection,1.15f-rough*.6f);
  float ao=1-.24f*seam-.32f*rivet;if(hit.part>=32&&fabsf(p.x)>3.65f&&fabsf(p.x)<5.7f&&p.y<1.1f)ao*=.82f;
  float3 result=plus(scale(plus(direct,plus(indirect,reflection)),ao),scale(color,emission));
+ result=plus(result,ship_local_light(p,n,view,color,camera,ship));
  if(mat==3){
   ShipHit interior=ship_trace(mesh,bounds,plus(p,scale(ray,.009f)),ray,2);
   float3 inside=vec(.008f,.015f,.019f);

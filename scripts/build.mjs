@@ -7,7 +7,7 @@ await mkdir('dist/kernels',{recursive:true});
 await mkdir('kernels',{recursive:true});
 for(const m of source.matchAll(/__global__ void (\w+)/g)){
  // Keep 64 lanes, but render horizontal strips for coherent pixel accesses.
- const name=m[1],artifact=compile(name.startsWith('ship_')?source:waterSource,{entry:name,workgroupSize:['render','render_pc','render_pc_single','ship_render'].includes(name)?[32,2,1]:['ship_probe','ship_mesh','ship_bounds','fft_local','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe'].includes(name)?[64,1,1]:['ship_step','ship_wash_pick','camera_step','brush_pick','weather_update','weather_visit','geology_seed','geology_update','geology_visit','terrain_cache_setup'].includes(name)?[1,1,1]:[8,8,1]});
+ const name=m[1],artifact=compile(name.startsWith('ship_')?source:waterSource,{entry:name,workgroupSize:['render','render_pc','render_pc_single','ship_render'].includes(name)?[32,2,1]:['ship_probe','ship_effect_probe','ship_mesh','ship_bounds','fft_local','sample_quality_probe','appearance_probe','celestial_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe'].includes(name)?[64,1,1]:['ship_step','ship_wash_pick','camera_step','brush_pick','weather_update','weather_visit','geology_seed','geology_update','geology_visit','terrain_cache_setup','terrain_camera_frame'].includes(name)?[1,1,1]:[8,8,1]});
  await writeFile(`dist/kernels/${name}.json`,JSON.stringify(serializableArtifact(artifact)));
  await writeFile(`kernels/${name}.json`,JSON.stringify(serializableArtifact(artifact)));
  console.log(`Compiled ${name}`);

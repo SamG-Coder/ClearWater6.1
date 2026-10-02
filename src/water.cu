@@ -185,19 +185,30 @@ __device__ float4 sample_pc(const float4 *s,float x,float z,int c,int slopes){
  }
  return make_float4(dot4(rows,wz),slopes!=0?dot4(derivatives,wz)*factor:0,slopes!=0?dot4(rows,dz)*factor:0,0);
 }
-// World-space seeded phase variation. Quintic blending gives continuous
-// derivatives at region boundaries, without extra spectra or FFT passes.
-__device__ float4 wave_region(float x,float z){
- float u=x/24,v=z/24,ix=floorf(u),iz=floorf(v);u=fract(u);v=fract(v);
- float du=30*u*u*(u-1)*(u-1)/24,dv=30*v*v*(v-1)*(v-1)/24;
- float a=u*u*u*(u*(u*6-15)+10),b=v*v*v*(v*(v*6-15)+10);
- float p=cell(ix,iz),q=cell(ix+1,iz),r=cell(ix,iz+1),t=cell(ix+1,iz+1);
- return make_float4((mixf(mixf(p,q,a),mixf(r,t,a),b)-.5f)*6,mixf(q-p,t-r,b)*du*6,mixf(r-p,t-q,a)*dv*6,0);
+// A seeded C2 field, including its analytic gradient. Wrapping the lattice
+// at the navigation chart's 6144 m boundary keeps the wave warp continuous.
+__device__ float4 pattern_corners(int ix,int iz,int seed,int period){
+ int mask=period-1;
+ return make_float4(cell((ix&mask)+seed,iz&mask),cell(((ix+1)&mask)+seed,iz&mask),cell((ix&mask)+seed,(iz+1)&mask),cell(((ix+1)&mask)+seed,(iz+1)&mask));
 }
-__device__ float4 region_wave(const float4 *s,float x,float z,int smooth,int slopes){
- float4 region=wave_region(x,z);
- float4 w=smooth!=0?sample_pc(s,x,z+region.x,0,slopes):sample(s,x,z+region.x,0);
- return make_float4(w.x,w.y+w.z*region.y,w.z*(1+region.z),0);
+__device__ float4 pattern_field(float x,float z,int seed,int period){
+ int ix=(int)floorf(x),iz=(int)floorf(z);float u=fract(x),v=fract(z);
+ float du=30*u*u*(u-1)*(u-1),dv=30*v*v*(v-1)*(v-1);
+ float a=u*u*u*(u*(u*6-15)+10),b=v*v*v*(v*(v*6-15)+10);
+ float4 corners=pattern_corners(ix,iz,seed,period);float p=corners.x,q=corners.y,r=corners.z,t=corners.w;
+ return make_float4(mixf(mixf(p,q,a),mixf(r,t,a),b),mixf(q-p,t-r,b)*du,mixf(r-p,t-q,a)*dv,0);
+}
+__device__ float4 wave_warp(float x,float z,int c,int axis){
+ float size=c==0?24:384,amplitude=c==0?4.2f:67.2f;
+ float4 n=pattern_field(x/size,z/size,axis==0?173:719,c==0?256:16);
+ return make_float4((n.x-.5f)*amplitude,n.y*amplitude/size,n.z*amplitude/size,0);
+}
+// Both cascades vary in two dimensions. The full Jacobian keeps normals
+// attached to the displaced surface; the pressure domain stays world-local.
+__device__ float4 region_wave(const float4 *s,float x,float z,int smooth,int slopes,int c){
+ float4 a=wave_warp(x,z,c,0),b=wave_warp(x,z,c,1);
+ float4 w=smooth!=0?sample_pc(s,x+a.x,z+b.x,c,slopes):sample(s,x+a.x,z+b.x,c);
+ return make_float4(w.x,w.y*(1+a.y)+w.z*b.y,w.y*a.z+w.z*(1+b.z),0);
 }
 // The periodic solver is sampled only inside its one world-space domain.
 // A C2 taper suppresses wraparound and includes its derivative in the normal.
@@ -211,7 +222,7 @@ __device__ float4 local_pressure(const float4 *s,const float4 *brush,float x,flo
  return make_float4(w.x*ax*az,(w.y*ax+w.x*dx)*az,(w.z*az+w.x*dz)*ax,0);
 }
 __device__ float4 wave_pc(const float4 *s,const float4 *brush,float x,float z,float fade,int pressureActive,int slopes){
- float4 a=region_wave(s,x,z,1,slopes),b=sample_pc(s,x,z,1,slopes),d=pressureActive!=0?local_pressure(s,brush,x,z,1,slopes):make_float4(0,0,0,0);
+ float4 a=region_wave(s,x,z,1,slopes,0),b=region_wave(s,x,z,1,slopes,1),d=pressureActive!=0?local_pressure(s,brush,x,z,1,slopes):make_float4(0,0,0,0);
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
 // Diagnostic only: compare reconstruction against an independent Fourier oracle.
@@ -222,7 +233,7 @@ __global__ void sample_quality_probe(const float4 *surface,const float4 *coeffic
 // An untouched pressure cascade is zero. Skip its bilinear reads until the
 // first gesture; preserve the same additions and fading in both paths.
 __device__ float4 wave(const float4 *s,const float4 *brush,float x,float z,float fade,int pressureActive){
- float4 a=region_wave(s,x,z,0,1),b=sample(s,x,z,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,1):make_float4(0,0,0,0);
+ float4 a=region_wave(s,x,z,0,1,0),b=region_wave(s,x,z,0,1,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,1):make_float4(0,0,0,0);
  // Fade unresolved short displacement as well as its normal near the horizon.
  return make_float4((a.x+d.x)*fade+b.x,(a.y+d.y)*fade+b.y,(a.z+d.z)*fade+b.z,0);
 }
@@ -231,12 +242,38 @@ __device__ float sample_height(const float4 *s,float x,float z,int c){
  float a=fract(u),b=fract(v);
  return mixf(mixf(s[base+wrap128(iz)*128+wrap128(ix)].x,s[base+wrap128(iz)*128+wrap128(ix+1)].x,a),mixf(s[base+wrap128(iz+1)*128+wrap128(ix)].x,s[base+wrap128(iz+1)*128+wrap128(ix+1)].x,a),b);
 }
+// The six surface-intersection iterations normally stay in one noise cell.
+// Cache its random corners once, but re-evaluate the exact quintic at every
+// position. Crossing a cell takes the uncached path: no linear approximation.
+struct WaveRegionCache {float4 cells;float4 shortX;float4 shortZ;float4 longX;float4 longZ;};
+__device__ WaveRegionCache wave_cache(float x,float z){
+ WaveRegionCache c;c.cells=make_float4(floorf(x/24),floorf(z/24),floorf(x/384),floorf(z/384));
+ c.shortX=pattern_corners((int)c.cells.x,(int)c.cells.y,173,256);c.shortZ=pattern_corners((int)c.cells.x,(int)c.cells.y,719,256);
+ c.longX=pattern_corners((int)c.cells.z,(int)c.cells.w,173,16);c.longZ=pattern_corners((int)c.cells.z,(int)c.cells.w,719,16);return c;
+}
+__device__ float2 cached_warp(float x,float z,int cascade,WaveRegionCache cache){
+ float size=cascade==0?24:384,amplitude=cascade==0?4.2f:67.2f;float u=x/size,v=z/size;
+ float ix=floorf(u),iz=floorf(v);u=fract(u);v=fract(v);
+ float a=u*u*u*(u*(u*6-15)+10),b=v*v*v*(v*(v*6-15)+10);
+ float4 cx=cascade==0?cache.shortX:cache.longX,cz=cascade==0?cache.shortZ:cache.longZ;
+ if(ix!=(cascade==0?cache.cells.x:cache.cells.z)||iz!=(cascade==0?cache.cells.y:cache.cells.w)){
+  cx=pattern_corners((int)ix,(int)iz,173,cascade==0?256:16);cz=pattern_corners((int)ix,(int)iz,719,cascade==0?256:16);
+ }
+ return make_float2((mixf(mixf(cx.x,cx.y,a),mixf(cx.z,cx.w,a),b)-.5f)*amplitude,(mixf(mixf(cz.x,cz.y,a),mixf(cz.z,cz.w,a),b)-.5f)*amplitude);
+}
+__device__ float cached_wave_height(const float4 *s,const float4 *coefficients,const float4 *brush,float x,float z,float fade,int pressureActive,int smooth,WaveRegionCache cache){
+ float2 a=cached_warp(x,z,0,cache),b=cached_warp(x,z,1,cache);
+ float h0=smooth!=0?sample_pc(coefficients,x+a.x,z+a.y,0,0).x:sample_height(s,x+a.x,z+a.y,0);
+ float h1=smooth!=0?sample_pc(coefficients,x+b.x,z+b.y,1,0).x:sample_height(s,x+b.x,z+b.y,1);
+ float pressure=0;if(pressureActive!=0)pressure=smooth!=0?local_pressure(coefficients,brush,x,z,1,0).x:local_pressure(s,brush,x,z,0,0).x;
+ return (h0+pressure)*fade+h1;
+}
 // Diagnostics: query the actual interaction and regional background fields.
 __global__ void domain_probe(const float4 *surface,const float4 *coefficients,const float4 *brush,const float4 *points,float4 *output,int count){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
  float4 p=points[i];output[i*4]=local_pressure(surface,brush,p.x,p.y,0,1);
  output[i*4+1]=local_pressure(coefficients,brush,p.x,p.y,1,1);
- output[i*4+2]=region_wave(coefficients,p.x,p.y,1,1);
+ output[i*4+2]=region_wave(coefficients,p.x,p.y,1,1,0);
  output[i*4+3]=sample(surface,p.x-brush[2].x,p.y-brush[2].y,2);
 }
 // Slow, bounded sediment transport proxy driven by the resolved FFT, not a
@@ -251,9 +288,9 @@ __global__ void sand_transport(const float4 *brush,const float4 *surface,const f
  if(useGlobeDepth!=0&&camera[21].w!=0&&camera[21].x>=3)return;
  if(useGlobeDepth!=0&&camera[21].w!=0)waterDepth=camera[21].x;
  float shallow=clamp01((3-waterDepth)/2);shallow=shallow*shallow*(3-2*shallow);
- float4 w=surface[16384+i];
+ float4 w=region_wave(surface,(float)x*.75f,(float)z*.75f,0,1,1);
  float shortBed=expf(-6.2831853f*waterDepth/6);
- float4 a=region_wave(surface,(float)x*.75f,(float)z*.75f,0,1);
+ float4 a=region_wave(surface,(float)x*.75f,(float)z*.75f,0,1,0);
  float4 d=pressureActive!=0?local_pressure(surface,brush,(float)x*.75f,(float)z*.75f,0,1):make_float4(0,0,0,0);
  float forcing=5*(w.x+shortBed*a.x+d.x*expf(-waterDepth*.8f));
  float rate=shallow*(forcing+8*(w.y*fabsf(w.y)+w.z*fabsf(w.z)));
@@ -263,7 +300,8 @@ __global__ void sand_transport(const float4 *brush,const float4 *surface,const f
  sandState[i]=make_float4(next,0,0,0);
 }
 __device__ float wave_height(const float4 *s,const float4 *brush,float x,float z,float distance,int pressureActive){
- float4 region=wave_region(x,z);float a=sample_height(s,x,z+region.x,0),b=sample_height(s,x,z,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,0).x:0;
+ float4 ax=wave_warp(x,z,0,0),az=wave_warp(x,z,0,1),bx=wave_warp(x,z,1,0),bz=wave_warp(x,z,1,1);
+ float a=sample_height(s,x+ax.x,z+az.x,0),b=sample_height(s,x+bx.x,z+bz.x,1),d=pressureActive!=0?local_pressure(s,brush,x,z,0,0).x:0;
  float fade=1/(1+distance*distance*.0008f);return (a+d)*fade+b;
 }
 // Geometry oracle entry: tested independently with double-precision ray equations.
@@ -420,21 +458,40 @@ __device__ float3 sky(float3 d,float3 sunDirection){
  float cirrus=cloud4*cloud4*clamp01(d.y*3)*.22f;
  return scale(blend(col,vec(.94f,.96f,1),cirrus),.015f+.985f*eased(-.08f,.3f,sunDirection.y));
 }
-__device__ float bottom(float x,float z,float depth){return -depth+.10f*sinf(x*.19f)*sinf(z*.23f)+.04f*sinf(x*.63f+z*.31f);}
+__device__ float4 bed_shape(float x,float z){
+ float4 a=pattern_field(x*.125f,z*.125f,331,1024),b=pattern_field(x*.43f+17,z*.43f-31,997,1024);
+ return make_float4((a.x-.5f)*.20f+(b.x-.5f)*.05f,a.y*.025f+b.y*.0215f,a.z*.025f+b.z*.0215f,0);
+}
+__device__ float bottom(float x,float z,float depth){return -depth+bed_shape(x,z).x;}
+struct BedRegionCache {float4 cells;float4 broad;float4 fine;};
+__device__ BedRegionCache bed_cache(float x,float z){
+ BedRegionCache c;c.cells=make_float4(floorf(x*.125f),floorf(z*.125f),floorf(x*.43f+17),floorf(z*.43f-31));
+ c.broad=pattern_corners((int)c.cells.x,(int)c.cells.y,331,1024);c.fine=pattern_corners((int)c.cells.z,(int)c.cells.w,997,1024);return c;
+}
+__device__ float cached_bottom(float x,float z,float depth,BedRegionCache cache){
+ float u=x*.125f,v=z*.125f,s=x*.43f+17,t=z*.43f-31;
+ float4 a=cache.broad,b=cache.fine;
+ if(floorf(u)!=cache.cells.x||floorf(v)!=cache.cells.y)a=pattern_corners((int)floorf(u),(int)floorf(v),331,1024);
+ if(floorf(s)!=cache.cells.z||floorf(t)!=cache.cells.w)b=pattern_corners((int)floorf(s),(int)floorf(t),997,1024);
+ u=fract(u);v=fract(v);s=fract(s);t=fract(t);
+ u=u*u*u*(u*(u*6-15)+10);v=v*v*v*(v*(v*6-15)+10);s=s*s*s*(s*(s*6-15)+10);t=t*t*t*(t*(t*6-15)+10);
+ float h=(mixf(mixf(a.x,a.y,u),mixf(a.z,a.w,u),v)-.5f)*.20f+(mixf(mixf(b.x,b.y,s),mixf(b.z,b.w,s),t)-.5f)*.05f;
+ return -depth+h;
+}
 __device__ float materialNoise(float x,float z){
  float ix=floorf(x),iz=floorf(z),u=fract(x),v=fract(z);u=u*u*(3-2*u);v=v*v*(3-2*v);
  return mixf(mixf(cell(ix,iz),cell(ix+1,iz),u),mixf(cell(ix,iz+1),cell(ix+1,iz+1),u),v);
 }
 __device__ float3 seabed(float x,float z,float footprint){
  float broad=materialNoise(x*.42f,z*.42f),mid=materialNoise(x*3.1f+17,z*3.1f);
- float bend=materialNoise(x*.8f,z*.8f)*2;
- float phase=z*38+x*5+bend;
+ float bend=materialNoise(x*.65f+13,z*.65f-7)*16,branch=materialNoise(x*.31f-29,z*.31f+11);
+ float phase=z*31+x*2.4f+bend;
  float ridge=sinf(phase),slope=cosf(phase);
  float detail=1/(1+footprint*footprint*1100);
  // Subpixel grain and gravel would flicker at reduced screen resolution.
  float grainDetail=1/(1+footprint*footprint*80000);
  float grain=grainDetail>.03f?materialNoise(x*170,z*170)*grainDetail:0;
- float illumination=.76f+detail*(.13f*ridge-.15f*slope+.1f*grain);
+ float illumination=.76f+detail*((.045f+.12f*branch)*ridge-(.04f+.13f*branch)*slope+.1f*grain);
  float3 sand=scale(blend(vec(.30f,.235f,.135f),vec(.49f,.41f,.26f),broad),illumination*(.85f+.2f*mid));
  // Sparse organic gravel pockets; most of the floor remains rippled sand.
  float pocket=clamp01((materialNoise(x*.7f+83,z*.7f-19)-.55f)*5);
@@ -466,13 +523,16 @@ __device__ float3 seabed(float x,float z,float footprint){
 // PC sand is a shallow geometric relief with analytic derivatives. Slowly
 // varying direction, spacing and amplitude break up the uniform stripe field.
 __device__ float4 sand_relief(float x,float z,float footprint){
- float bend=x*.41f+z*.23f,branch=z*.77f-x*.17f,modulation=x*.29f+z*.37f;
- float phase=z*31+x*2.4f+2.8f*sinf(bend)+1.1f*sinf(branch);
- float phaseX=2.4f+1.148f*cosf(bend)-.187f*cosf(branch),phaseZ=31+.644f*cosf(bend)+.847f*cosf(branch);
- float detail=1/(1+footprint*footprint*1100),amp=(.0065f+.0025f*sinf(modulation))*detail;
- float ampX=.000725f*cosf(modulation)*detail,ampZ=.000925f*cosf(modulation)*detail;
+ float4 bend=pattern_field(x*.65f+13,z*.65f-7,541,1024),branch=pattern_field(x*.31f-29,z*.31f+11,811,1024);
+ float phase=z*31+x*2.4f+bend.x*16,phaseX=2.4f+bend.y*10.4f,phaseZ=31+bend.z*10.4f;
+ float detail=1/(1+footprint*footprint*1100),amp=(.0018f+.007f*branch.x)*detail;
+ float ampX=.00217f*branch.y*detail,ampZ=.00217f*branch.z*detail;
  float ridge=cosf(phase)+.18f*cosf(2*phase+.6f),derivative=-sinf(phase)-.36f*sinf(2*phase+.6f);
- return make_float4(amp*ridge,ampX*ridge+amp*derivative*phaseX,ampZ*ridge+amp*derivative*phaseZ,phase);
+ // A weaker oblique family creates crest joins and sheltered gaps instead of
+ // one unbroken set of parallel lines. All normals differentiate this height.
+ float other=z*26-x*10+bend.x*9,weight=.0024f*(1-branch.x)*detail;
+ float co=cosf(other),si=-sinf(other);
+ return make_float4(amp*ridge+weight*co,ampX*ridge+amp*derivative*phaseX-.000744f*branch.y*detail*co+weight*si*(-10+bend.y*5.85f),ampZ*ridge+amp*derivative*phaseZ-.000744f*branch.z*detail*co+weight*si*(26+bend.z*5.85f),phase);
 }
 __device__ float4 sand_moving(float x,float z,float footprint,float4 drift,float anchorX,float anchorZ){
  // Phase is locally linear over the millimetre-scale bed intersection correction.
@@ -532,8 +592,8 @@ __device__ float4 stone_relief(float x,float z,float footprint,float3 sun){
  }
  return make_float4(height,gradientX,gradientZ,tone>=0?tone+1:-shadow);
 }
-__device__ float bottom_pc(float x,float z,float depth,float footprint,float4 drift,float anchorX,float anchorZ){
- return bottom(x,z,depth)+sand_moving(x,z,footprint,drift,anchorX,anchorZ).x+stone_relief(x,z,footprint,sunDir()).x;
+__device__ float bottom_pc(float x,float z,float depth,float footprint,float4 drift,float anchorX,float anchorZ,BedRegionCache cache){
+ return cached_bottom(x,z,depth,cache)+sand_moving(x,z,footprint,drift,anchorX,anchorZ).x+stone_relief(x,z,footprint,sunDir()).x;
 }
 __device__ float3 seabed_pc(float x,float z,float footprint,float4 sand,float4 stone,float3 sun,float3 view){
  float broad=materialNoise(x*.42f,z*.42f),mid=materialNoise(x*3.1f+17,z*3.1f),fine=1/(1+footprint*footprint*80000);
@@ -548,8 +608,7 @@ __device__ float3 seabed_pc(float x,float z,float footprint,float4 sand,float4 s
   float mineral=flecks>.03f?materialNoise(x*380-11,z*380+29)*flecks:0;
   rock=scale(rock,.76f+.3f*speckle+.07f*mineral);color=blend(color,rock,coverage);
  }
- float macroX=.019f*cosf(x*.19f)*sinf(z*.23f)+.0252f*cosf(x*.63f+z*.31f);
- float macroZ=.023f*sinf(x*.19f)*cosf(z*.23f)+.0124f*cosf(x*.63f+z*.31f);
+ float4 macro=bed_shape(x,z);float macroX=macro.y,macroZ=macro.z;
  float3 normal=unit(vec(-macroX-sand.y-stone.y,1,-macroZ-sand.z-stone.z));
  float shade=.26f+.84f*fmaxf(0,dotv(normal,sun));
  if(stone.w<0)shade*=1+.35f*stone.w;
@@ -649,7 +708,7 @@ __global__ void caustic_resolve(const unsigned *photons,float4 *light,float *mon
  if(dispersion==0)monoLight[z*lightSize+x]=r;else light[z*lightSize+x]=make_float4(r,g,b,1);
 }
 __device__ float3 caustic(const float4 *light,const float *monoLight,float x,float z,int dispersion,int lightSize){
- z+=wave_region(x,z).x;
+ float4 wx=wave_warp(x,z,0,0),wz=wave_warp(x,z,0,1);x+=wx.x;z+=wz.x;
  float offset=lightSize>256?.5f:0;
  float u=fract(x/6)*(float)lightSize-offset,v=fract(z/6)*(float)lightSize-offset;int ix=((int)floorf(u))&(lightSize-1),iz=((int)floorf(v))&(lightSize-1);float a=fract(u),b=fract(v);
  // Mobile sunlight has identical RGB channels. Read and interpolate it once.
@@ -662,13 +721,27 @@ __device__ float3 caustic(const float4 *light,const float *monoLight,float x,flo
 }
 __device__ float film(float a){return clamp01((a*(2.51f*a+.03f))/(a*(2.43f*a+.59f)+.14f));}
 // Seam-free 3D cloud density on the spherical normal; no latitude texture seam.
-__device__ float globe_noise(float3 p){
- float ix=floorf(p.x),iy=floorf(p.y),iz=floorf(p.z),x=fract(p.x),y=fract(p.y),z=fract(p.z);
+__device__ float globe_noise_shifted(float3 origin,float3 p){
+ float ix=origin.x+floorf(p.x),iy=origin.y+floorf(p.y),iz=origin.z+floorf(p.z),x=fract(p.x),y=fract(p.y),z=fract(p.z);
  x=x*x*(3-2*x);y=y*y*(3-2*y);z=z*z*(3-2*z);float value=0;
  for(int k=0;k<2;k++)for(int j=0;j<2;j++)for(int i=0;i<2;i++){
   unsigned h=(unsigned)((int)(ix+(float)i)*92837111+(int)(iy+(float)j)*689287499+(int)(iz+(float)k)*283923481);
   value+=randf(h)*(i==0?1-x:x)*(j==0?1-y:y)*(k==0?1-z:z);
  }return value;
+}
+__device__ float globe_noise(float3 p){return globe_noise_shifted(vec(0,0,0),p);}
+// Value and gradient from the same eight corners. Distant water uses this
+// filtered field instead of two planet-wide sine trains.
+__device__ float4 globe_gradient(float3 p){
+ float ix=floorf(p.x),iy=floorf(p.y),iz=floorf(p.z),x=fract(p.x),y=fract(p.y),z=fract(p.z);
+ float dx=30*x*x*(x-1)*(x-1),dy=30*y*y*(y-1)*(y-1),dz=30*z*z*(z-1)*(z-1);
+ x=x*x*x*(x*(x*6-15)+10);y=y*y*y*(y*(y*6-15)+10);z=z*z*z*(z*(z*6-15)+10);
+ float4 out=make_float4(0,0,0,0);
+ for(int k=0;k<2;k++)for(int j=0;j<2;j++)for(int i=0;i<2;i++){
+  unsigned h=(unsigned)((int)(ix+(float)i)*92837111+(int)(iy+(float)j)*689287499+(int)(iz+(float)k)*283923481);
+  float a=i==0?1-x:x,b=j==0?1-y:y,c=k==0?1-z:z,v=randf(h);
+  out.x+=v*a*b*c;out.y+=v*(i==0?-dx:dx)*b*c;out.z+=v*a*(j==0?-dy:dy)*c;out.w+=v*a*b*(k==0?-dz:dz);
+ }return out;
 }
 
 
@@ -783,15 +856,44 @@ __device__ float terrain_direct(const float4 *camera,float3 n){
 
 // A camera-local spherical cache amortizes terrain evaluation. Its frame is
 // fixed between recentres, so fly-camera rotation never moves the land texture.
-__global__ void terrain_cache_setup(float4 *camera,int width,int offset,int enabled){
+__global__ void terrain_cache_setup(float4 *camera,int width,int offset,int enabled,int nearWidth,int nearOffset){
  float3 n=vec(camera[6].x,camera[6].y,camera[6].z),old=vec(camera[27].x,camera[27].y,camera[27].z);
  float3 delta=minus(n,old);int update=enabled!=0&&camera[0].y<40000&&((int)camera[27].w!=width||camera[30].x!=camera[22].z||dotv(delta,delta)*earth_radius()*earth_radius()>16000000)?1:0;
  camera[30].y=(float)update;camera[30].z=4;
+ camera[31].y=(float)nearOffset;camera[31].z=(float)nearWidth;
+ float3 nearOld=vec(camera[nearOffset].x,camera[nearOffset].y,camera[nearOffset].z),nearDelta=minus(n,nearOld);
+ int nearUpdate=enabled!=0&&camera[0].y<4000&&(update!=0||camera[nearOffset].w==0||camera[nearOffset+3].x!=camera[22].z||dotv(nearDelta,nearDelta)*earth_radius()*earth_radius()>65536)?1:0;
+ camera[nearOffset+3].y=(float)nearUpdate;
+ if(nearUpdate!=0){
+  camera[nearOffset]=make_float4(n.x,n.y,n.z,(float)nearWidth);
+  camera[nearOffset+1]=make_float4(camera[5].x,camera[5].y,camera[5].z,2048);
+  camera[nearOffset+2]=make_float4(camera[7].x,camera[7].y,camera[7].z,0);
+  camera[nearOffset+3].x=camera[22].z;camera[nearOffset+3].z+=1;
+ }
  if(update==0)return;
  camera[27]=make_float4(n.x,n.y,n.z,(float)width);
  camera[28]=make_float4(camera[5].x,camera[5].y,camera[5].z,(float)offset);
  camera[29]=make_float4(camera[7].x,camera[7].y,camera[7].z,32768);
  camera[30].x=camera[22].z;
+}
+__global__ void terrain_camera_frame(float4 *camera,const float2 *navigationState){
+ int nearOffset=(int)camera[31].y;
+ // Split the exact eye position once. Fine terrain uses small metre offsets,
+ // so its texture and intersections avoid Earth-radius float quantization.
+ double nx=(double)navigationState[0].x+(double)navigationState[0].y,ny=(double)navigationState[1].x+(double)navigationState[1].y,nz=(double)navigationState[2].x+(double)navigationState[2].y;
+ double ex=(double)navigationState[3].x+(double)navigationState[3].y,ey=(double)navigationState[4].x+(double)navigationState[4].y,ez=(double)navigationState[5].x+(double)navigationState[5].y;
+ double navX=(double)navigationState[6].x+(double)navigationState[6].y,navZ=(double)navigationState[7].x+(double)navigationState[7].y;
+ double ox=camera[19].z!=0?(double)camera[0].x-(navX-(double)floorf((float)((navX+3072.0)/6144.0))*6144.0):0.0;
+ double oz=camera[19].z!=0?(double)camera[0].z-(navZ-(double)floorf((float)((navZ+3072.0)/6144.0))*6144.0):0.0;
+ double radial=6371000.0+(double)camera[0].y,cy=sqrt(radial*radial-ox*ox-oz*oz);
+ double px=nx*cy+ex*ox+(ey*nz-ez*ny)*oz,py=ny*cy+ey*ox+(ez*nx-ex*nz)*oz,pz=nz*cy+ez*ox+(ex*ny-ey*nx)*oz;
+ float3 ne=vec(camera[nearOffset+1].x,camera[nearOffset+1].y,camera[nearOffset+1].z),nb=vec(camera[nearOffset+2].x,camera[nearOffset+2].y,camera[nearOffset+2].z);
+ float3 ce=vec(camera[5].x,camera[5].y,camera[5].z),cn=vec(camera[6].x,camera[6].y,camera[6].z),cb=vec(camera[7].x,camera[7].y,camera[7].z);
+ camera[nearOffset+4]=make_float4(dotv(ce,ne),dotv(cn,ne),dotv(cb,ne),(float)(px*(double)ne.x+py*(double)ne.y+pz*(double)ne.z));
+ camera[nearOffset+5]=make_float4(dotv(ce,nb),dotv(cn,nb),dotv(cb,nb),(float)(px*(double)nb.x+py*(double)nb.y+pz*(double)nb.z));
+ double gx=(.8*px+.6*pz)*.19,gy=(.36*px+.8*py-.48*pz)*.19,gz=(-.48*px+.6*py+.64*pz)*.19;
+ float ix=floorf((float)gx),iy=floorf((float)gy),iz=floorf((float)gz);
+ camera[nearOffset+6]=make_float4(ix,iy,iz,0);camera[nearOffset+7]=make_float4((float)(gx-(double)ix),(float)(gy-(double)iy),(float)(gz-(double)iz),0);
 }
 __global__ void terrain_cache(float4 *camera,int width){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
@@ -815,7 +917,7 @@ __device__ float4 terrain_weights(float a){
  return make_float4(b*b*b/6,(4-6*a2+3*a3)/6,(1+3*a+3*a2-3*a3)/6,a3/6);
 }
 
-__device__ float terrain_height(const float4 *camera,float3 n){
+__device__ float terrain_coarse_height(const float4 *camera,float3 n){
  float fade=1-eased(20000,180000,camera[0].y);
  if(fade==0)return geology_sample(camera,n).x;
  float4 centre=camera[27],east=camera[28],back=camera[29];int width=(int)centre.w;
@@ -833,7 +935,7 @@ __device__ float terrain_height(const float4 *camera,float3 n){
  }else h=terrain_direct(camera,n);
  return fade<1?mixf(geology_sample(camera,n).x,h,fade):h;
 }
-__device__ float4 terrain_cached_gradient(const float4 *camera,float3 n){
+__device__ float4 terrain_coarse_gradient(const float4 *camera,float3 n){
  float4 centre=camera[27],east=camera[28],back=camera[29];int width=(int)centre.w;
  float u=dotv(n,vec(east.x,east.y,east.z))*earth_radius()/32768+.5f,v=dotv(n,vec(back.x,back.y,back.z))*earth_radius()/32768+.5f;
  float h=0,gx=0,gz=0;
@@ -857,14 +959,92 @@ __device__ float4 terrain_cached_gradient(const float4 *camera,float3 n){
  grad=scale(minus(grad,scale(n,dotv(n,grad))),factor);
  return make_float4(grad.x,grad.y,grad.z,h);
 }
+// A nested 2 km patch resolves close terrain without raising the global cache
+// resolution. Build only after 256 m travel, and keep the same frame on rotation.
+// Hermite samples store height and both derivatives: four vector loads replace
+// the sixteen scalar loads used by the broad terrain spline.
+__global__ void terrain_near_cache(float4 *camera,int width){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y,offset=(int)camera[31].y;
+ if(x>=width||y>=width||camera[offset+3].y==0)return;
+ float4 c=camera[offset],e=camera[offset+1],b=camera[offset+2];
+ float u=(((float)x+.5f)/(float)width-.5f)*2048/earth_radius(),v=(((float)y+.5f)/(float)width-.5f)*2048/earth_radius();
+ float f=sqrtf(fmaxf(0,1-u*u-v*v));float3 n=vec(c.x*f+e.x*u+b.x*v,c.y*f+e.y*u+b.y*v,c.z*f+e.z*u+b.z*v);
+ float h=terrain_coarse_height(camera,n),amplitude=2.4f*eased(0,12,h),seed=camera[22].z*.013f;
+ float3 p=plus(terrain_rotate(scale(n,earth_radius()/38)),vec(seed,21,49));
+ float relief=(globe_noise(p)-.5f)*1.45f+(globe_noise(terrain_rotate(scale(p,2.71f)))-.5f)*.55f;
+ camera[offset+8+y*width+x]=make_float4(h+amplitude*relief,0,0,0);
+}
+__global__ void terrain_near_coefficients(float4 *camera,int width){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y,offset=(int)camera[31].y;
+ if(x>=width||y>=width||camera[offset+3].y==0)return;
+ int xm=x>0?x-1:x,xp=x+1<width?x+1:x,ym=y>0?y-1:y,yp=y+1<width?y+1:y,source=offset+8;
+ float h=camera[source+y*width+x].x,dx=(camera[source+y*width+xp].x-camera[source+y*width+xm].x)*.5f,dz=(camera[source+yp*width+x].x-camera[source+ym*width+x].x)*.5f;
+ float mixed=(camera[source+yp*width+xp].x-camera[source+yp*width+xm].x-camera[source+ym*width+xp].x+camera[source+ym*width+xm].x)*.25f;
+ camera[source+width*width+y*width+x]=make_float4(h,dx,dz,mixed);
+}
+struct TerrainNear { float h; float3 gradient; float weight; float3 weightGradient; };
+__device__ float2 terrain_cubic_pair(float4 a,float4 b,float4 w){return make_float2(a.x*w.x+a.y*w.y+b.x*w.z+b.y*w.w,a.z*w.x+a.w*w.y+b.z*w.z+b.w*w.w);}
+__device__ TerrainNear terrain_near_sample_uv(const float4 *camera,float3 n,float u,float v){
+ TerrainNear out;out.h=0;out.gradient=vec(0,0,0);out.weight=0;out.weightGradient=vec(0,0,0);
+ int offset=(int)camera[31].y;if(offset==0||camera[31].x!=0||camera[0].y>=20000)return out;
+ float4 c=camera[offset],e=camera[offset+1],b=camera[offset+2];int width=(int)c.w;
+ if(width==0||dotv(n,vec(c.x,c.y,c.z))<.999f)return out;
+ float edge=fminf(fminf(u,1-u),fminf(v,1-v));if(edge<=.06f)return out;
+ float x=u*(float)width-.5f,y=v*(float)width-.5f,a=fract(x),d=fract(y),a2=a*a,d2=d*d;int ix=(int)floorf(x),iy=(int)floorf(y),source=offset+8+width*width;
+ float4 wx=make_float4(2*a2*a-3*a2+1,a2*a-2*a2+a,-2*a2*a+3*a2,a2*a-a2),wz=make_float4(2*d2*d-3*d2+1,d2*d-2*d2+d,-2*d2*d+3*d2,d2*d-d2);
+ float4 dx=make_float4(6*a2-6*a,3*a2-4*a+1,-6*a2+6*a,3*a2-2*a),dz=make_float4(6*d2-6*d,3*d2-4*d+1,-6*d2+6*d,3*d2-2*d);
+ int row=source+iy*width+ix;float4 q00=camera[row],q10=camera[row+1],q01=camera[row+width],q11=camera[row+width+1];
+ float2 r0=terrain_cubic_pair(q00,q10,wx),r1=terrain_cubic_pair(q01,q11,wx),s0=terrain_cubic_pair(q00,q10,dx),s1=terrain_cubic_pair(q01,q11,dx);
+ out.h=r0.x*wz.x+r0.y*wz.y+r1.x*wz.z+r1.y*wz.w;
+ float gx=s0.x*wz.x+s0.y*wz.y+s1.x*wz.z+s1.y*wz.w,gz=r0.x*dz.x+r0.y*dz.y+r1.x*dz.z+r1.y*dz.w;
+ float3 g=scale(vec(e.x*gx+b.x*gz,e.y*gx+b.y*gz,e.z*gx+b.z*gz),(float)width/2048);out.gradient=minus(g,scale(n,dotv(g,n)));
+ // Relief is already zero with zero slope at sea level in the source field.
+ // Keep the inexpensive reconstruction in submerged parts of the patch too.
+ float t=clamp01((edge-.06f)/.14f);out.weight=t*t*(3-2*t);
+ float sign=u<.5f?1:-1;float3 axis=vec(e.x,e.y,e.z);if(fminf(v,1-v)<fminf(u,1-u)){sign=v<.5f?1:-1;axis=vec(b.x,b.y,b.z);}
+ axis=minus(axis,scale(n,dotv(axis,n)));
+ out.weightGradient=scale(axis,sign*6*t*(1-t)/(.14f*2048));
+ return out;
+}
+__device__ TerrainNear terrain_near_sample(const float4 *camera,float3 n){
+ int offset=(int)camera[31].y;float4 e=camera[offset+1],b=camera[offset+2];
+ float u=dotv(n,vec(e.x,e.y,e.z))*earth_radius()/2048+.5f,v=dotv(n,vec(b.x,b.y,b.z))*earth_radius()/2048+.5f;
+ return terrain_near_sample_uv(camera,n,u,v);
+}
+__device__ float terrain_height(const float4 *camera,float3 n){
+ TerrainNear near=terrain_near_sample(camera,n);if(near.weight>=1)return near.h;
+ return mixf(terrain_coarse_height(camera,n),near.h,near.weight);
+}
+__device__ float4 terrain_cached_gradient(const float4 *camera,float3 n){
+ TerrainNear near=terrain_near_sample(camera,n);if(near.weight>=1)return make_float4(near.gradient.x,near.gradient.y,near.gradient.z,near.h);
+ float4 coarse=terrain_coarse_gradient(camera,n);if(near.weight<=0||coarse.w< -90000)return coarse;
+ float3 gradient=plus(blend(vec(coarse.x,coarse.y,coarse.z),near.gradient,near.weight),scale(near.weightGradient,near.h-coarse.w));
+ return make_float4(gradient.x,gradient.y,gradient.z,mixf(coarse.w,near.h,near.weight));
+}
 __device__ float3 terrain_world(const float4 *camera,float3 ray,float t){
  return to_world(camera,unit(vec(ray.x*t,earth_radius()+camera[0].y+ray.y*t,ray.z*t)));
+}
+__device__ TerrainNear terrain_near_ray(const float4 *camera,float3 ray,float t){
+ int offset=(int)camera[31].y;float4 e=camera[offset+4],b=camera[offset+5];
+ float radius=earth_radius()+terrain_ray_altitude(camera[0].y,ray,t),factor=earth_radius()/(radius*2048);
+ float u=(e.w+dotv(vec(e.x,e.y,e.z),ray)*t)*factor+.5f,v=(b.w+dotv(vec(b.x,b.y,b.z),ray)*t)*factor+.5f;
+ return terrain_near_sample_uv(camera,terrain_world(camera,ray,t),u,v);
+}
+__device__ float terrain_ray_height(const float4 *camera,float3 ray,float t){
+ TerrainNear near=terrain_near_ray(camera,ray,t);if(near.weight>=1)return near.h;
+ return mixf(terrain_coarse_height(camera,terrain_world(camera,ray,t)),near.h,near.weight);
+}
+__device__ float4 terrain_ray_gradient(const float4 *camera,float3 ray,float t){
+ TerrainNear near=terrain_near_ray(camera,ray,t);if(near.weight>=1)return make_float4(near.gradient.x,near.gradient.y,near.gradient.z,near.h);
+ float4 coarse=terrain_coarse_gradient(camera,terrain_world(camera,ray,t));if(near.weight<=0||coarse.w< -90000)return coarse;
+ float3 g=plus(blend(vec(coarse.x,coarse.y,coarse.z),near.gradient,near.weight),scale(near.weightGradient,near.h-coarse.w));
+ return make_float4(g.x,g.y,g.z,mixf(coarse.w,near.h,near.weight));
 }
 __device__ float terrain_clearance(const float4 *camera,float3 ray,float t){
  float hy=camera[0].y+ray.y*t,x=ray.x*t,z=ray.z*t,R=earth_radius();
  // Rationalized altitude keeps metre precision beside a 6371 km radius.
  float altitude=hy+(x*x+z*z)/(sqrtf((R+hy)*(R+hy)+x*x+z*z)+R+hy);
- return altitude-terrain_height(camera,terrain_world(camera,ray,t));
+ return altitude-terrain_ray_height(camera,ray,t);
 }
 __device__ float terrain_ray_altitude(float altitude,float3 ray,float t){
  float y=altitude+ray.y*t,x=ray.x*t,z=ray.z*t,R=earth_radius();
@@ -876,13 +1056,13 @@ __device__ float terrain_refine(const float4 *camera,float3 ray,float t,float ra
  float initial=t,altitude=camera[0].y;float3 worldRay=to_world(camera,ray);
  for(int j=0;j<5;j++){
   if(t<=0||fabsf(t-initial)>radius)return -1;
-  float3 n=terrain_world(camera,ray,t);float4 g=terrain_cached_gradient(camera,n);
+  float3 n=terrain_world(camera,ray,t);float4 g=terrain_ray_gradient(camera,ray,t);
   if(altitude>=20000)return -1;
-  float h=g.w> -90000?g.w:terrain_height(camera,n);if(h<=0)return -1;
+  float h=g.w> -90000?g.w:terrain_ray_height(camera,ray,t);if(h<=0)return -1;
   float height=terrain_ray_altitude(altitude,ray,t),error=height-h;
   // The world normal is float32: below this range-scaled residual, another
   // refinement mainly changes coordinate rounding rather than the hit.
-  if(fabsf(error)<.04f+t*.000004f)return t;
+  if(fabsf(error)<.004f+t*.0000008f)return t;
   float3 radial=unit(vec(ray.x*t,earth_radius()+altitude+ray.y*t,ray.z*t));
   float derivative=dotv(radial,ray);
   if(g.w> -90000)derivative-=dotv(vec(g.x,g.y,g.z),worldRay)*earth_radius()/(earth_radius()+height);
@@ -909,7 +1089,7 @@ __device__ float terrain_local_upper(const float4 *camera,float3 a,float3 b){
  while((1<<level)<span){int side=width>>level;offset+=side*side;level++;}
  int w=width>>level;float peak=-12000;
  for(int j=0;j<2;j++)for(int i=0;i<2;i++){int x=(i==0?x0:x1)>>level,y=(j==0?y0:y1)>>level;peak=fmaxf(peak,camera[offset+y*w+x].x);}
- return peak+.01f;
+ return peak>0?peak+4.01f:peak+.01f;
 }
 __device__ float geology_height_uv(const float4 *camera,float u,float v){
  int width=(int)camera[22].y,offset=(int)camera[22].x,x=(int)floorf(u),y=(int)floorf(v);float a=fract(u),b=fract(v);
@@ -933,7 +1113,7 @@ __device__ float terrain_upper(const float4 *camera,float3 ray,float start,float
  float lowX=fminf(p.x,q.x)-pad,highX=fmaxf(p.x,q.x)+pad;lowY-=padding;highY+=padding;
  if(floorf(lowX)==floorf(highX)&&floorf(lowY)==floorf(highY)&&lowY>=0&&highY<(float)(width/2-1)){
   float peak=fmaxf(fmaxf(geology_height_uv(camera,lowX,lowY),geology_height_uv(camera,highX,lowY)),fmaxf(geology_height_uv(camera,lowX,highY),geology_height_uv(camera,highX,highY)));
-  return peak<=0?0:peak+414*eased(20,600,peak)+139*eased(10,250,peak)+.1f;
+  return peak<=0?0:peak+414*eased(20,600,peak)+139*eased(10,250,peak)+4.1f;
  }
  int x0=(int)floorf(lowX),x1=(int)ceilf(highX),y0=(int)floorf(lowY),y1=(int)ceilf(highY);
  y0=y0<0?0:y0;y1=y1>=width/2?width/2-1:y1;
@@ -945,7 +1125,7 @@ __device__ float terrain_upper(const float4 *camera,float3 ray,float start,float
  if(peak<=0)return 0;
  // Exact amplitude bounds for the procedural land detail, also enclosing
  // its positive, normalized B-spline reconstruction.
- return peak+414*eased(20,600,peak)+139*eased(10,250,peak)+.1f;
+ return peak+414*eased(20,600,peak)+139*eased(10,250,peak)+4.1f;
 }
 __device__ float terrain_trace(const float4 *camera,float3 ray,float sea,float upperHint){
  if(camera[21].w==0)return -1;
@@ -967,7 +1147,7 @@ __device__ float terrain_trace(const float4 *camera,float3 ray,float sea,float u
  if(end<=start)return -1;
  if(camera[31].w==0&&end<wet.z){
   float nearest=fminf(end,fmaxf(0,-(earth_radius()+altitude)*ray.y));
-  if(terrain_ray_altitude(altitude,ray,nearest)>wet.x+wet.y*end+.01f)return -1;
+  if(terrain_ray_altitude(altitude,ray,nearest)>wet.x+wet.y*end+4.01f)return -1;
  }
  // A local tangent-plane seed resolves nearby shores/hills without spending
  // the horizon budget on metre-sized steps. Refine against spherical height.
@@ -997,7 +1177,7 @@ __device__ float terrain_trace(const float4 *camera,float3 ray,float sea,float u
    if(terrain_clearance(camera,ray,t)<0){
     float lo=previous,hi=t;
     for(int j=0;j<10;j++){float mid=(lo+hi)*.5f;if(terrain_clearance(camera,ray,mid)>0)lo=mid;else hi=mid;}
-    float hit=(lo+hi)*.5f;return terrain_height(camera,terrain_world(camera,ray,hit))>0?hit:-1;
+    float hit=(lo+hi)*.5f;return terrain_ray_height(camera,ray,hit)>0?hit:-1;
    }previous=t;
   }
  }return -1;
@@ -1108,7 +1288,8 @@ __global__ void geology_update(float4 *camera,float depth,int enabled){
 }
 __global__ void terrain_probe(const float4 *points,const float4 *camera,float4 *output,int count,int rays){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z));
- if(rays!=0){float t=terrain_trace(camera,n,globe_hit(camera[0].y,n),-1);output[i]=make_float4(t,t>0?terrain_clearance(camera,n,t):0,t>0?terrain_height(camera,terrain_world(camera,n,t)):0,0);}
+ if(rays==2){output[i]=terrain_cached_gradient(camera,n);}
+ else if(rays!=0){float t=terrain_trace(camera,n,globe_hit(camera[0].y,n),-1);output[i]=make_float4(t,t>0?terrain_clearance(camera,n,t):0,t>0?terrain_height(camera,terrain_world(camera,n,t)):0,0);}
  else output[i]=make_float4(terrain_height(camera,n),geology_sample(camera,n).x,0,0);
 }
 // Test-only oracle: a dense first-crossing trace without screen seeds, cached
@@ -1129,7 +1310,7 @@ __global__ void terrain_screen_probe(const float4 *points,const float4 *camera,c
   if(terrain_clearance(camera,ray,t)<0){
    float lo=previous,hi=t;
    for(int k=0;k<18;k++){float mid=(lo+hi)*.5f;if(terrain_clearance(camera,ray,mid)>0)lo=mid;else hi=mid;}
-   float hit=(lo+hi)*.5f;if(terrain_height(camera,terrain_world(camera,ray,hit))>0)reference=hit;break;
+   float hit=(lo+hi)*.5f;if(terrain_ray_height(camera,ray,hit)>0)reference=hit;break;
   }previous=t;
  }
  output[i]=make_float4(actual,reference,actual>0?terrain_clearance(camera,ray,actual):0,terrain_tile_upper(hits,camera,x,y));
@@ -1153,6 +1334,13 @@ __device__ float3 globe_sun(float clock,float season){
  float day=clock/86400,declination=.3977885f*sinf((season+day-81)*.01720242f);
  float angle=(.5f-fract(day))*6.2831853f,c=sqrtf(1-declination*declination);
  return vec(sinf(angle)*c,declination,cosf(angle)*c);
+}
+// Mean-radius circular Moon, not an astronomical ephemeris. Physical scale:
+// https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html
+__device__ float3 globe_moon(float clock){
+ float days=clock/86400,orbit=days*6.2831853f/27.32166f+1.6f;
+ float angle=orbit-days*6.2831853f,latitude=.44f*sinf(orbit);
+ return scale(vec(sinf(angle)*cosf(latitude),sinf(latitude),cosf(angle)*cosf(latitude)),384400000);
 }
 __device__ float4 weather_cell(float3 n,float clock,float season,int component){
  float days=clock/86400,ay=fabsf(n.y),summer=.07f*sinf((season+days-81)*.01720242f);
@@ -1219,22 +1407,31 @@ __global__ void weather_map(float4 *camera,float clock,float season,int mapSize)
  float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));int id=y*mapSize+x;
  camera[32+id]=weather_cell(n,clock,season,0);camera[32+mapSize*mapSize/2+id]=weather_cell(n,clock,season,1);
 }
-__device__ float cloud_density(const float4 *camera,float3 normal,int layer){
- float cover=weather_map_sample(camera,normal,0).x;
+__device__ float cloud_filtered_column(const float4 *camera,float3 normal,int layer,float cover,float footprint){
  if(cover<.04f)return 0;
  float days=camera[13].x/86400,ay=fabsf(normal.y);
  float mid=expf(-(ay-.7f)*(ay-.7f)*40),zonal=-7+24*mid-4*eased(.8f,.98f,ay);
  float3 q=rotate_y(normal,-days*zonal*.01356f);
- // Four filtered bands retain wisps and structure within large systems.
+ // Rotate and bend successive scales so their Cartesian lattice axes cannot
+ // line up into repeated blocks. Density is independent of camera altitude.
  float coarse=globe_noise(plus(scale(q,31),vec(11,17,31)));
- float medium=globe_noise(plus(scale(q,83),vec(3,29,7)));
- float fine=globe_noise(scale(q,211));
- float detail=globe_noise(scale(q,layer==0?823:397));
- float resolved=1-eased(30000,300000,camera[0].y);
- float shape=coarse*.42f+medium*.30f+fine*.20f+mixf(.5f,detail,resolved)*.08f;
- float threshold=.59f-cover*.31f;
+ float medium=globe_noise(plus(terrain_rotate(scale(q,83)),vec(3+coarse*3,29,7-coarse*2)));
+ float fine=globe_noise(plus(terrain_rotate(terrain_rotate(scale(q,211))),vec(medium*2,17,31)));
+ float detail=globe_noise(terrain_rotate(scale(q,layer==0?823:397)));
+ float shape=coarse*.48f+medium*.32f+fine*.20f;
+ float threshold=.61f-cover*.32f;
  float density=fmaxf(0,shape-threshold)*3.2f;
- return clamp01(density)*(.60f+.40f*medium)*(layer==0?1.0f:.35f)*eased(.03f,.35f,cover);
+ // Kilometre-scale formations open actual gaps within the large weather
+ // systems. Weak detail on top of a positive column only made a flat sheet.
+ float resolved=1/(1+footprint*footprint*.0000000625f);
+ float formation=eased(.62f-cover*.35f,.83f-cover*.35f,mixf(.5f,detail,resolved)*.8f+fine*.2f);
+ return clamp01(density)*formation*eased(.015f,.14f,density)*(.60f+.40f*medium)*(layer==0?1.0f:.35f)*eased(.03f,.35f,cover);
+}
+__device__ float cloud_column(const float4 *camera,float3 normal,int layer,float cover){
+ return cloud_filtered_column(camera,normal,layer,cover,0);
+}
+__device__ float cloud_density(const float4 *camera,float3 normal,int layer){
+ return cloud_column(camera,normal,layer,weather_map_sample(camera,normal,0).x);
 }
 __global__ void weather_update(float4 *camera,float clock,float season,float time,float dt,float baseWind,int enabled,int mapSize,int skyWidth,int refresh){
  float3 n=vec(camera[6].x,camera[6].y,camera[6].z),east=vec(camera[5].x,camera[5].y,camera[5].z),back=vec(camera[7].x,camera[7].y,camera[7].z);
@@ -1261,6 +1458,7 @@ __global__ void weather_update(float4 *camera,float clock,float season,float tim
  float localHour=fract(clock/86400+atan2f(n.x,n.z)/6.2831853f)*24;
  camera[17]=make_float4(wind,field.y,atan2f(n.y,sqrtf(n.x*n.x+n.z*n.z))*57.29578f,localHour);
  camera[18]=make_float4(n.x,n.y,n.z,0);camera[19].w=1;
+ float3 moon=globe_moon(clock);camera[7].w=moon.x;camera[9].w=moon.y;camera[18].w=moon.z;
 }
 __global__ void weather_probe(const float4 *points,float4 *output,const float4 *camera,int count,float season){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
@@ -1342,7 +1540,7 @@ __device__ float4 globe_clouds(float3 ray,const float4 *camera,float ground){
 }
 // View-dependent cloud volume, cached below output resolution. Shadowing is a
 // bounded vertical optical-depth approximation; the density is truly 3D.
-__device__ float4 cloud_volume(float3 ray,const float4 *camera,float ground){
+__device__ float4 cloud_volume(float3 ray,const float4 *camera,float ground,float pixelAngle,float jitter){
  float altitude=camera[0].y,R=earth_radius();float2 outer=sphere_roots(altitude,ray,8200),inner=sphere_roots(altitude,ray,800);
  if(outer.y<=0)return make_float4(0,0,0,0);
  float start=fmaxf(0,outer.x),end=outer.y;
@@ -1350,24 +1548,38 @@ __device__ float4 cloud_volume(float3 ray,const float4 *camera,float ground){
  else if(inner.x>0)end=fminf(end,inner.x);
  if(ground>0)end=fminf(end,ground);
  if(end<=start)return make_float4(0,0,0,0);
- int steps=camera[16].x>256?24:12;float step=(end-start)/(float)steps,trans=1;float3 color=vec(0,0,0),sun=vec(camera[9].x,camera[9].y,camera[9].z);
+ // In atmosphere, optical haze hides the far tail. Spend the fixed march
+ // budget on nearby formations instead of kilometres of empty horizon.
+ end=fminf(end,start+mixf(90000,1000000,eased(16000,90000,altitude)));
+ int steps=camera[16].x>256?32:12;float span=end-start,trans=1;float3 color=vec(0,0,0),sun=vec(camera[9].x,camera[9].y,camera[9].z);
+ float concentrate=1-eased(12000,60000,altitude);
  float phase=.45f+.65f*positive_power(fmaxf(0,dotv(ray,sun)),8);
  for(int i=0;i<steps;i++){
   if(trans<.015f)break;
-  float t=start+((float)i+.5f)*step;float3 p=vec(ray.x*t,R+altitude+ray.y*t,ray.z*t);
-  float radius=sqrtf(dotv(p,p)),h=radius-R;float3 local=scale(p,1/radius),normal=to_world(camera,local);
+  float a=(float)i/(float)steps,b=(float)(i+1)/(float)steps;a=mixf(a,a*a,concentrate);b=mixf(b,b*b,concentrate);
+  // Stratification decorrelates ray samples from equal-height density slices.
+  // Keep the pattern fixed in screen space: no time-varying noise or history.
+  float step=(b-a)*span,t=start+(a+(b-a)*fract(jitter+(float)i*.61803399f))*span;float3 p=vec(ray.x*t,R+altitude+ray.y*t,ray.z*t);
+  float radius=sqrtf(dotv(p,p)),h=terrain_ray_altitude(altitude,ray,t);float3 local=scale(p,1/radius),normal=to_world(camera,local);
   float cover=weather_map_sample(camera,normal,0).x;
   float top=2200+cover*5300,vertical=(h-800)/(top-800);
   if(vertical<=0||vertical>=1||cover<.08f)continue;
-  float column=cloud_density(camera,normal,0);if(column<.008f)continue;
+  float column=cloud_filtered_column(camera,normal,0,cover,t*pixelAngle);if(column<.008f)continue;
+  // Denser formations grow taller; sparse edges taper into separate puffs.
+  top=2200+cover*6000*(.32f+.68f*eased(.025f,.40f,column));vertical=(h-800)/(top-800);
+  if(vertical>=1)continue;
   float days=camera[13].x/86400,ay=fabsf(normal.y),zonal=-7+24*expf(-(ay-.7f)*(ay-.7f)*40)-4*eased(.8f,.98f,ay);
-  float3 q=rotate_y(scale(normal,radius*.00065f),-days*zonal*.01356f);
-  float detail=globe_noise(q)*.67f+globe_noise(scale(q,2.37f))*.33f;
-  float envelope=eased(0,.12f,vertical)*(1-eased(.48f,1,vertical));
-  float density=fmaxf(0,column-(1-detail)*.20f)*envelope;
+  float3 q=terrain_rotate(rotate_y(scale(normal,radius*.00085f),-days*zonal*.01356f));
+  float billow=globe_noise(q),detail=globe_noise(plus(terrain_rotate(scale(q,2.37f)),vec(billow*2,11,7)));
+  // Resolved billows erode the top, not just the opacity of a flat slab.
+  // Integrating wide orbital footprints averages the smallest erosion band.
+  float erosion=mixf(.5f,detail,1/(1+step*step*.000001f));
+  float ceiling=.38f+.48f*billow+.14f*erosion;
+  float envelope=eased(0,.10f,vertical)*(1-eased(ceiling-.26f,ceiling,vertical));
+  float density=fmaxf(0,column*(.55f+billow*.90f)-(1-erosion)*.08f)*envelope;
   if(density<.003f)continue;
   float mu=dotv(local,sun),daylight=eased(-.08f,.22f,mu);
-  float optical=(top-h)*column*.0017f/fmaxf(.15f,mu);
+  float optical=fmaxf(0,800+(top-800)*ceiling-h)*column*.0017f/fmaxf(.15f,mu);
   float direct=expf(-optical),fill=.10f+.18f*expf(-density*3);
   float3 ambient=blend(vec(.055f,.080f,.13f),vec(.34f,.42f,.52f),vertical);
   float3 lit=plus(scale(ambient,.015f+daylight*(.4f+fill)),scale(vec(1,.96f,.86f),daylight*(direct*.9f+fill*.45f)*phase));
@@ -1384,7 +1596,19 @@ __global__ void weather_cloud_view(float4 *camera,const float *hits,int cloudWid
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));
  float ground=globe_hit(camera[0].y,ray),land=terrain_trace(camera,ray,ground,camera[21].w!=0?terrain_tile_upper(hits,camera,(int)(((float)x+.5f)/(float)cloudWidth*camera[26].z),(int)(((float)y+.5f)/(float)cloudHeight*camera[26].w)):-1);
  if(land>0)ground=land;
- camera[131104+y*cloudWidth+x]=cloud_volume(ray,camera,ground);
+ camera[131104+y*cloudWidth+x]=cloud_volume(ray,camera,ground,1.3f/(float)cloudHeight,randf((unsigned)(x+y*cloudWidth)+7919u));
+}
+// Filter the low-resolution premultiplied cloud cache once, rather than adding
+// expensive noise-removal taps to every full-resolution optical sample.
+__global__ void weather_cloud_filter(float4 *camera,float4 *scratch,int width,int height,int axis){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
+ int radius=camera[16].x>256?2:1;float4 sum=make_float4(0,0,0,0);
+ for(int i=-radius;i<=radius;i++){
+  int xx=x+(axis==0?i:0),yy=y+(axis==1?i:0);xx=xx<0?0:(xx>=width?width-1:xx);yy=yy<0?0:(yy>=height?height-1:yy);
+  float weight=radius==1?(i==0?.5f:.25f):(i==0?.375f:(i==1||i==-1?.25f:.0625f));
+  float4 p=axis==0?camera[131104+yy*width+xx]:scratch[yy*width+xx];sum.x+=p.x*weight;sum.y+=p.y*weight;sum.z+=p.z*weight;sum.w+=p.w*weight;
+ }
+ if(axis==0)scratch[y*width+x]=sum;else camera[131104+y*width+x]=sum;
 }
 __device__ float4 cloud_view_sample(const float4 *camera,float sx,float sy){
  int width=(int)camera[20].x,height=(int)camera[20].y;
@@ -1407,7 +1631,7 @@ __device__ float3 rain_surface(float x,float z,float time,float rain,float footp
  }return vec(nx*.92387953f-nz*.38268343f,0,nx*.38268343f+nz*.92387953f);
 }
 __device__ float rain_volume(float3 origin,float3 ray,float distance,const float4 *camera){
- float rain=camera[11].x,time=camera[13].y;if(rain<.01f||origin.y>1400)return 0;
+ float rain=camera[11].x*(1-eased(900,1600,origin.y)),time=camera[13].y;if(rain<.01f)return 0;
  float result=0,windX=camera[10].x*.16f,windZ=camera[10].y*.16f;
  for(int axis=0;axis<2;axis++){
   float dir=axis==0?ray.z:ray.x,along=axis==0?origin.z:origin.x,velocity=axis==0?windZ:windX,transverse=axis==0?windX:windZ;
@@ -1429,11 +1653,50 @@ __device__ float3 space_stars(float3 d){
  float glow=chance>.99965f?(.15f+randf(seed+17u)*.7f):0;
  return vec(glow*.84f,glow*.91f,glow);
 }
+__device__ float3 moon_position(const float4 *camera){return vec(camera[7].w,camera[9].w,camera[18].w);}
+__device__ float3 moon_material(float3 n,float3 sun,float3 view,float3 centre){
+ // A tidally locked procedural surface: the maria/craters rotate with the
+ // Earth-facing lunar frame, independently of the observer and lighting.
+ float3 front=scale(unit(centre),-1),right=unit(crossv(vec(0,1,0),front)),up=crossv(front,right);
+ float3 p=vec(dotv(n,right),dotv(n,up),dotv(n,front));
+ float mare=globe_noise(plus(scale(p,4.7f),vec(13,7,19))),detail=globe_noise(terrain_rotate(scale(p,29)));
+ float albedo=mixf(.085f,.23f,eased(.35f,.63f,mare))*(.84f+detail*.28f);
+ float relief=0;
+ for(int i=0;i<12;i++){
+  unsigned seed=(unsigned)i*317u+721u;float3 c=unit(vec(randf(seed)*2-1,randf(seed+7u)*2-1,randf(seed+13u)*2-1));
+  float radius=.027f+.064f*randf(seed+19u),d=sqrtf(fmaxf(0,2*(1-dotv(p,c))))/radius;
+  if(d>1.4f)continue;float rim=expf(-(d-1)*(d-1)*60),bowl=1-eased(.65f,.96f,d);albedo*=1-bowl*.23f+rim*.32f;
+  relief+=(dotv(c,vec(dotv(sun,right),dotv(sun,up),dotv(sun,front)))-dotv(n,sun))*rim*3;
+ }
+ float nl=fmaxf(0,dotv(n,sun)),nv=fmaxf(.015f,dotv(n,view));
+ // Lambert + lunar opposition response. The dark hemisphere receives only
+ // faint Earthshine; it is never an emissive full disk.
+ float illumination=nl>0?(.65f*nl+.35f*nl/(nl+nv))*(1+relief):0;
+ float behind=-dotv(centre,sun),shadowDistance=sqrtf(fmaxf(0,dotv(centre,centre)-behind*behind));
+ float solarVisibility=behind>0?eased(earth_radius()-800000,earth_radius()+800000,shadowDistance):1;
+ float earthshine=.0025f*fmaxf(0,dotv(n,front));
+ return scale(vec(.95f,.94f,.91f),albedo*(illumination*solarVisibility*2.6f+earthshine));
+}
+__device__ float4 moon_ray(float3 worldRay,const float4 *camera){
+ float3 centre=moon_position(camera),eye=scale(vec(camera[6].x,camera[6].y,camera[6].z),earth_radius()+camera[0].y),delta=minus(centre,eye);
+ float projection=dotv(delta,worldRay);if(projection<=0)return make_float4(0,0,0,-1);
+ // Perpendicular-distance form avoids subtracting almost equal distance^2
+ // terms when a 1737 km disk is seen from 384400 km away.
+ float3 nearest=minus(delta,scale(worldRay,projection));float radius=1737400,disc=radius*radius-dotv(nearest,nearest);
+ if(disc<0)return make_float4(0,0,0,-1);float root=sqrtf(disc),t=projection-root;if(t<=0)return make_float4(0,0,0,-1);
+ float3 n=scale(minus(scale(worldRay,-root),nearest),1/radius),sun=vec(camera[12].x,camera[12].y,camera[12].z);
+ float3 color=moon_material(n,sun,scale(worldRay,-1),centre);return make_float4(color.x,color.y,color.z,t);
+}
+__global__ void celestial_probe(const float4 *camera,const float4 *points,float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z));
+ if(p.w==0){output[i]=moon_ray(n,camera);return;}
+ float3 sun=vec(camera[12].x,camera[12].y,camera[12].z),col=moon_material(n,sun,n,moon_position(camera));output[i]=make_float4(col.x,col.y,col.z,fmaxf(0,dotv(n,sun)));
+}
 
 __device__ float3 terrain_radiance(const float4 *camera,float3 ray,float t){
  float3 n=terrain_world(camera,ray,t),axis=fabsf(n.y)>.95f?vec(1,0,0):vec(0,1,0),east=unit(crossv(axis,n)),north=crossv(n,east);
  float h=0,spacing=fmaxf(32,t*.00045f),step=spacing/earth_radius(),dx=0,dz=0;
- float4 cached=camera[0].y<20000&&t<30000?terrain_cached_gradient(camera,n):make_float4(0,0,0,-100000);float3 normal=n;
+ float4 cached=camera[0].y<20000&&t<30000?terrain_ray_gradient(camera,ray,t):make_float4(0,0,0,-100000);float3 normal=n;
  if(cached.w> -90000&&camera[0].y<20000&&t<30000){
   float3 gradient=vec(cached.x,cached.y,cached.z);h=cached.w;dx=dotv(gradient,east);dz=dotv(gradient,north);normal=unit(minus(n,gradient));
  }else{
@@ -1445,13 +1708,20 @@ __device__ float3 terrain_radiance(const float4 *camera,float3 ray,float t){
  float3 sun=vec(camera[12].x,camera[12].y,camera[12].z);
  float3 climateP=plus(scale(n,9),vec(17,5,camera[22].z*.01f));
  float latitude=fabsf(n.y),patches=globe_noise(climateP)*.55f+globe_noise(terrain_rotate(scale(climateP,2.73f)))*.30f+globe_noise(terrain_rotate(scale(climateP,7.31f)))*.15f,texture=globe_noise(terrain_rotate(scale(n,1351)));
- float grain=globe_noise(vec((camera[0].x+ray.x*t)*.8f,h*.8f,(camera[0].z+ray.z*t)*.8f));
+ // Material coordinates are Earth-fixed too; the chase camera chart must not
+ // drag the grain across the beach when circling the ship.
+ float grain=.5f;
+ if(t<2000){int o=(int)camera[31].y;float4 base=camera[o+6],fraction=camera[o+7];float3 delta=terrain_rotate(scale(to_world(camera,ray),t*.19f));
+  grain=mixf(.5f,globe_noise_shifted(vec(base.x,base.y,base.z),plus(vec(fraction.x,fraction.y,fraction.z),delta)),1-eased(1500,2000,t));
+ }
  float desert=expf(-(latitude-.42f)*(latitude-.42f)*65)*(.28f+.72f*patches);
  float3 grass=blend(vec(.032f,.075f,.027f),vec(.12f,.14f,.05f),patches);
  float3 albedo=blend(grass,vec(.38f,.27f,.13f),desert);
  float rocky=eased(.045f,.19f,sqrtf(dx*dx+dz*dz))*eased(200,1600,h);
  albedo=blend(albedo,blend(vec(.13f,.115f,.095f),vec(.27f,.24f,.20f),texture),rocky);
- albedo=blend(albedo,vec(.40f,.33f,.20f),1-eased(2,18,h));
+ float sandGrain=mixf(.5f,grain,1/(1+t*t*.000003f));
+ albedo=blend(albedo,blend(vec(.27f,.215f,.125f),vec(.49f,.415f,.27f),sandGrain),1-eased(2,18,h));
+ albedo=scale(albedo,mixf(.48f,1,eased(.05f,1.5f,h)));
  float snowline=3900-3300*latitude*latitude+(patches-.5f)*700,snow=eased(snowline-180,snowline+250,h);
  snow=fmaxf(snow,eased(.91f,.99f,latitude));albedo=blend(albedo,vec(.74f,.80f,.84f),snow);
  albedo=scale(albedo,.83f+.25f*texture+(grain-.5f)*.16f/(1+t*t*.0001f));
@@ -1460,13 +1730,24 @@ __device__ float3 terrain_radiance(const float4 *camera,float3 ray,float t){
  float light=.008f+day*.19f+direct*(.95f-cover*.33f);
  return scale(albedo,light);
 }
-__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int cachedCloud,float pixelU,float pixelV,float landT){
+__device__ float cloud_visibility(float altitude,float3 ray){
+ // An observer inside the volume has no clear-air gap in front of its entry.
+ // Intersecting an arbitrary middle shell here creates a discontinuity at that
+ // shell's tangent and paints a bright horizontal strip across the horizon.
+ float distance=0;
+ if(altitude<800){float2 roots=sphere_roots(altitude,ray,800);distance=fmaxf(0,roots.y);}
+ else if(altitude>8200){float2 roots=sphere_roots(altitude,ray,8200);distance=fmaxf(0,roots.x);}
+ return mixf(expf(-distance*.000055f),1,eased(5000,20000,altitude));
+}
+__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int cachedCloud,float pixelU,float pixelV,float landT,float pixelAngle){
  float altitude=camera[0].y,R=earth_radius();float4 sl=camera[9];float3 sun=vec(sl.x,sl.y,sl.z),worldRay=to_world(camera,ray);
  float visibility=fmaxf(eased(25000,90000,altitude),1-eased(-.12f,.08f,sun.y));
  float3 color=scale(space_stars(camera[13].w!=0?rotate_y(worldRay,camera[13].x*.00007292115f):worldRay),visibility);float sunDot=dotv(ray,sun);
  if(sunDot>.99996f)color=plus(color,vec(18,15,11));
+ float moonDistance=-1;
+ if((hit<0&&landT<0)||altitude>80000){float4 moon=moon_ray(worldRay,camera);float nearest=landT>0?landT:hit;if(moon.w>0&&(nearest<0||moon.w<nearest)){color=vec(moon.x,moon.y,moon.z);moonDistance=moon.w;hit=moon.w;landT=-1;}}
  if(landT>0){color=terrain_radiance(camera,ray,landT);hit=landT;}
- else if(hit>0){
+ else if(hit>0&&moonDistance<0){
   float3 localNormal=unit(vec(ray.x*hit,R+altitude+ray.y*hit,ray.z*hit)),normal=to_world(camera,localNormal);
   float day=clamp01(dotv(localNormal,sun)),limb=1-clamp01(-dotv(localNormal,ray));
   float basin=globe_noise(scale(normal,7));
@@ -1477,12 +1758,23 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int 
    float4 flow=weather_map_sample(camera,normal,1);wind=sqrtf(flow.x*flow.x+flow.y*flow.y+flow.z*flow.z);
    // Resolved metre-scale glints fade to a statistical rough surface as the
    // footprint grows. This avoids drawing a smooth plastic sheet at flight height.
-   float footprint=hit*.001f,detail=1/(1+footprint*footprint*.012f),time=camera[13].y;
-   float warp=detail>.01f?globe_noise(scale(normal,R/240))*4:0;
-   float phase1=dotv(normal,vec(.042f,.011f,.028f))*R-time*.72f+warp;
-   float phase2=dotv(normal,vec(-.017f,.031f,.006f))*R-time*.53f-warp*.7f;
-   float3 variation=plus(scale(vec(.83f,.22f,.55f),cosf(phase1)*.028f),scale(vec(-.47f,.86f,.17f),cosf(phase2)*.023f));
-   variation=scale(minus(variation,scale(normal,dotv(normal,variation))),detail);
+   float footprint=hit*pixelAngle,detail=1/(1+footprint*footprint*.0018f),time=camera[13].y;
+   float3 variation=vec(0,0,0);
+   if(detail>.002f){
+    float3 p=scale(normal,R/38);p=plus(p,vec(time*.023f,-time*.017f,time*.031f));
+    float4 a=globe_gradient(p),b=globe_gradient(plus(terrain_rotate(scale(p,2.73f)),vec(31,17,11)));
+    // Transpose rotation transforms the second field's derivative back.
+    float3 g=vec(.8f*b.y+.36f*b.z-.48f*b.w,.8f*b.z+.6f*b.w,.6f*b.y-.48f*b.z+.64f*b.w);
+    variation=plus(scale(vec(a.y,a.z,a.w),.055f),scale(g,.026f/(1+footprint*footprint*.06f)));
+   }
+   variation=scale(variation,detail);
+   float swellDetail=1/(1+footprint*footprint*.000055f);
+   if(swellDetail>.005f){
+    float4 swell=globe_gradient(plus(terrain_rotate(scale(normal,R/220)),vec(time*.003f,11,-time*.005f)));
+    float3 g=vec(.8f*swell.y+.36f*swell.z-.48f*swell.w,.8f*swell.z+.6f*swell.w,.6f*swell.y-.48f*swell.z+.64f*swell.w);
+    variation=plus(variation,scale(g,.038f*swellDetail));
+   }
+   variation=minus(variation,scale(normal,dotv(normal,variation)));
    float3 worldNormal=unit(minus(normal,variation));
    shadingNormal=vec(dotv(worldNormal,vec(camera[5].x,camera[5].y,camera[5].z)),dotv(worldNormal,vec(camera[6].x,camera[6].y,camera[6].z)),dotv(worldNormal,vec(camera[7].x,camera[7].y,camera[7].z)));
   }
@@ -1490,7 +1782,7 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int 
   float3 reflectedRay=minus(ray,scale(shadingNormal,2*dotv(ray,shadingNormal)));
   float skyElevation=clamp01(dotv(reflectedRay,localNormal));
   float3 reflected=scale(blend(vec(.36f,.50f,.63f),vec(.035f,.10f,.23f),sqrtf(skyElevation)),.012f+day);
-  if(camera[13].w!=0&&altitude<400)reflected=weather_sky_sample(reflectedRay,camera);
+  if(camera[13].w!=0&&altitude<1800)reflected=blend(weather_sky_sample(reflectedRay,camera),reflected,eased(600,1800,altitude));
   color=blend(scale(ocean,.04f+day*1.2f),reflected,fresnel);
   float3 halfv=unit(minus(sun,ray));float nh=fmaxf(0,dotv(halfv,shadingNormal)),alpha=.035f+.0045f*fminf(25,wind),a2=alpha*alpha;
   float denominator=nh*nh*(a2-1)+1;
@@ -1529,12 +1821,11 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int 
   }
   color=plus(vec(color.x*transmission.x,color.y*transmission.y,color.z*transmission.z),scatter);
  }
- if(camera[13].w!=0){
+ if(camera[13].w!=0&&(moonDistance<0||(atmosphere.y>0&&fmaxf(0,atmosphere.x)<moonDistance))){
   float4 clouds=cachedCloud!=0?cloud_view_sample(camera,pixelU,pixelV):globe_clouds(ray,camera,hit);
   // In the lower atmosphere, haze lies between the eye and the clouds. Do not
   // integrate an entire clear-sky column over an opaque cloud base.
-  float2 roots=sphere_roots(altitude,ray,1600);float cloudDistance=roots.x>0?roots.x:roots.y;
-  float visible=mixf(expf(-fmaxf(0,cloudDistance)*.000055f),1,eased(5000,20000,altitude));
+  float visible=cloud_visibility(altitude,ray);
   color=plus(scale(color,1-clouds.w*visible),scale(vec(clouds.x,clouds.y,clouds.z),visible));
  }
  return color;
@@ -1542,10 +1833,10 @@ __device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int 
 
 __global__ void weather_sky(float4 *camera,int skyWidth){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y,height=skyWidth/4;
- if(x>=skyWidth||y>=height||camera[0].y>=400)return;
+ if(x>=skyWidth||y>=height||camera[0].y>=1800)return;
  float angle=(((float)x+.5f)/(float)skyWidth)*6.2831853f,e=((float)y+.5f)/(float)height;e=e*e*1.5707963f;
  float3 ray=vec(sinf(angle)*cosf(e),sinf(e),-cosf(angle)*cosf(e));
- float3 col=planet_radiance(ray,camera,-1,0,0,0,-1);camera[65568+y*skyWidth+x]=make_float4(col.x,col.y,col.z,1);
+ float3 col=planet_radiance(ray,camera,-1,0,0,0,-1,1.3f/(float)skyWidth);camera[65568+y*skyWidth+x]=make_float4(col.x,col.y,col.z,1);
 }
 __device__ float3 weather_sky_sample(float3 d,const float4 *camera){
  int width=(int)camera[16].x,height=width/4;
@@ -1555,12 +1846,52 @@ __device__ float3 weather_sky_sample(float3 d,const float4 *camera){
  for(int j=0;j<2;j++)for(int i=0;i<2;i++){float4 p=camera[65568+(y+j)*width+((x+i)&(width-1))];col=plus(col,scale(vec(p.x,p.y,p.z),(i==0?1-a:a)*(j==0?1-b:b)));}return col;
 }
 __device__ float3 surface_weather(float3 col,float3 ray,const float4 *camera,float distance){
- float rain=camera[11].x;if(rain<.01f)return col;
+ float rain=camera[11].x*(1-eased(800,2400,camera[0].y));if(rain<.01f)return col;
  float daylight=.015f+.985f*eased(-.08f,.3f,camera[9].y);
  float haze=(1-expf(-fminf(distance,3000)*rain*.0012f));
  col=blend(col,scale(vec(.17f,.23f,.28f),daylight),haze);
  float streak=rain_volume(vec(camera[0].x,camera[0].y,camera[0].z),ray,distance,camera);
  return plus(col,scale(vec(.45f,.55f,.62f),streak*daylight*.4f));
+}
+__device__ float3 craft_water(float3 col,float3 p,float3 n,float3 ray,const float4 *camera,const float4 *brush){
+ if(camera[19].z==0||camera[19].x>80)return col;
+ float foam=0,time=brush[10].w;
+ for(int i=0;i<2;i++){
+  float4 jet=brush[4+i];if(jet.w<.001f)continue;float dx=p.x-jet.x,dz=p.z-jet.y,r=sqrtf(dx*dx+dz*dz),radius=jet.z;
+  if(r>radius*4)continue;
+  float noise=globe_noise(vec(dx*1.9f,dz*1.9f,time*.9f));
+  float ring=(r-radius*(1.25f+.45f*noise))/fmaxf(.15f,radius*.40f);
+  float rim=expf(-ring*ring*1.4f),crest=eased(.035f,.28f,1-n.y);
+  foam+=jet.w*rim*(.38f+.62f*noise)+jet.w*crest*expf(-r*r/(radius*radius*5));
+ }
+ float day=.025f+.975f*eased(-.08f,.25f,camera[9].y);col=blend(col,scale(vec(.50f,.67f,.71f),day),clamp01(foam*.8f));
+ for(int i=0;i<4;i++){
+  float4 source=brush[6+i];if(source.w<=0)continue;float3 delta=minus(vec(source.x,source.y,source.z),p);float d2=dotv(delta,delta);if(d2>3600)continue;
+  float3 light=unit(delta),halfv=unit(minus(light,ray));float nl=fmaxf(0,dotv(n,light)),nh=fmaxf(0,dotv(n,halfv));
+  float cone=i<2?1:eased(.68f,.94f,-dotv(light,vec(brush[10].x,brush[10].y,brush[10].z)));
+  float rough=.08f+.18f*clamp01(foam),a2=rough*rough,den=nh*nh*(a2-1)+1;
+  float spec=a2/(3.14159265f*den*den+.00001f)*.035f;
+  float amount=source.w/(4+d2)*(1-eased(1600,3600,d2))*cone*(nl*(.025f+foam*.3f)+spec);
+  float3 hue=i<2?vec(.045f,.30f,1):vec(.68f,.84f,1);col=plus(col,scale(hue,amount));
+ }
+ return col;
+}
+__device__ float3 craft_spray(float3 col,float3 ray,const float4 *camera,const float4 *brush,float limit){
+ if(camera[19].z==0||camera[19].x>32)return col;
+ float time=brush[10].w,day=.015f+.985f*eased(-.08f,.25f,camera[9].y);
+ for(int i=0;i<2;i++){
+  float4 jet=brush[4+i];if(jet.w<.001f)continue;float radius=jet.z*2.8f,height=.6f+jet.w*.9f;
+  float3 origin=vec((camera[0].x-jet.x)/radius,(camera[0].y-.45f)/height,(camera[0].z-jet.y)/radius),dir=vec(ray.x/radius,ray.y/height,ray.z/radius);
+  float a=dotv(dir,dir),b=dotv(origin,dir),disc=b*b-a*(dotv(origin,origin)-1);if(disc<=0)continue;
+  float root=sqrtf(disc),lo=fmaxf(0,(-b-root)/a),hi=fminf(limit>0?limit:1000,(-b+root)/a);if(hi<=lo)continue;
+  float density=0;
+  for(int j=0;j<3;j++){float t=lo+(hi-lo)*((float)j+.5f)/3;float3 q=plus(origin,scale(dir,t));float radius2=q.x*q.x+q.z*q.z;
+   float noise=globe_noise(vec(q.x*5+time*.7f,q.y*4-time*1.2f,q.z*5));density+=eased(.08f,.50f,radius2)*(1-dotv(q,q))*(.35f+noise*.65f);
+  }
+  float opacity=1-expf(-fmaxf(0,density)*(hi-lo)*jet.w*.20f);
+  float3 light=plus(scale(vec(.43f,.59f,.64f),day),scale(vec(.015f,.075f,.24f),jet.w));col=blend(col,light,opacity);
+ }
+ return col;
 }
 __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const float4 *coefficients,const float4 *light,const float *monoLight,const float4 *camera,int width,int height,float depth,float exposure,int view,int pressureActive,int dispersion,int lightSize,float pixelX,float pixelY,float sampleScale){
  if(camera[21].w!=0)depth=camera[21].x;
@@ -1574,20 +1905,20 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float vignette=1-.10f*(sx*sx+sy*sy);
  if(view>=3&&globeT>0){float3 normal=to_world(camera,unit(vec(ray.x*globeT,earth_radius()+pos.y+ray.y*globeT,ray.z*globeT)));return geology_color(geology_sample(camera,normal),view);}
  float landT=terrain_pixel_hit(monoLight,camera,width,height,pixelX,pixelY,view);
- if(globeT<0||planetMix>=1||landT>0){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
+ if(globeT<0||planetMix>=1||landT>0){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT,1.3f/((float)height*sampleScale));if(camera[13].w!=0)far=surface_weather(far,ray,camera,landT>0?landT:(globeT>0?globeT:3000));return scale(far,exposure*vignette);}
  if(globeT>0){
- float t=globeT;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ float t=globeT;float4 w=make_float4(0,0,0,0);WaveRegionCache regions=wave_cache(pos.x+ray.x*t,pos.z+ray.z*t);
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=cached_wave_height(surface,coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,smooth,regions);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
  w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 rain=camera[13].w!=0?rain_surface(p.x,p.z,camera[13].y,camera[11].x,pixelFootprint):vec(0,0,0);float3 n=unit(vec(-w.y-rain.x+ray.x*t/earth_radius(),1,-w.z-rain.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflection=minus(ray,scale(n,2*viewCosine));float3 reflected=camera[13].w!=0?weather_sky_sample(reflection,camera):sky(reflection,localSun);
- if(camera[21].w!=0)depth=fmaxf(.15f,-terrain_height(camera,terrain_world(camera,ray,t)));
+ if(camera[21].w!=0)depth=fmaxf(.15f,-terrain_ray_height(camera,ray,t));
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
- float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
- for(int j=0;j<(smooth!=0?4:2);j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;BedRegionCache bedRegions=bed_cache(bx,bz);
+ for(int j=0;j<(smooth!=0?4:2);j++){travel=(cached_bottom(bx,bz,depth,bedRegions)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,pixelFootprint),ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
  float opticalDistance=travel+(camera[21].w!=0?depth/.86f:forward.w);
@@ -1599,10 +1930,14 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec*(camera[13].w!=0?camera[11].y*eased(-.02f,.08f,localSun.y):1)));
- float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);if(camera[13].w!=0)col=surface_weather(col,ray,camera,t);
+ float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);
+ if(view==0)col=craft_water(col,p,n,ray,camera,brush);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray,localSun);}
- if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT),planetMix);
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT,1.3f/((float)height*sampleScale)),planetMix);
+ // Apply the same air path after mixing near and distant water.
+ if(camera[13].w!=0)col=surface_weather(col,ray,camera,globeT>0?globeT:3000);
+ if(view==0)col=craft_spray(col,ray,camera,brush,globeT);
  col=scale(col,exposure*vignette);
  return col;
 }
@@ -1618,23 +1953,23 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float vignette=1-.10f*(sx*sx+sy*sy);
  if(view>=3&&globeT>0){float3 normal=to_world(camera,unit(vec(ray.x*globeT,earth_radius()+pos.y+ray.y*globeT,ray.z*globeT)));return geology_color(geology_sample(camera,normal),view);}
  float landT=terrain_pixel_hit(monoLight,camera,width,height,pixelX,pixelY,view);
- if(globeT<0||planetMix>=1||landT>0){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
+ if(globeT<0||planetMix>=1||landT>0){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT,1.3f/((float)height*sampleScale));if(camera[13].w!=0)far=surface_weather(far,ray,camera,landT>0?landT:(globeT>0?globeT:3000));return scale(far,exposure*vignette);}
  if(globeT>0){
- float t=globeT;float4 w=make_float4(0,0,0,0);
- for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
+ float t=globeT;float4 w=make_float4(0,0,0,0);WaveRegionCache regions=wave_cache(pos.x+ray.x*t,pos.z+ray.z*t);
+ for(int i=0;i<(smooth!=0?6:4);i++){float h=cached_wave_height(surface,coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,smooth,regions);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
  float3 p=vec(pos.x+ray.x*t,pos.y+ray.y*t,pos.z+ray.z*t);
  float causticDetail=1/(1+t*t*.0008f),pixelFootprint=t/((float)height*sampleScale);
  w=smooth!=0?wave_pc(coefficients,brush,p.x,p.z,causticDetail,pressureActive,1):wave(surface,brush,p.x,p.z,causticDetail,pressureActive);float3 rain=camera[13].w!=0?rain_surface(p.x,p.z,camera[13].y,camera[11].x,pixelFootprint):vec(0,0,0);float3 n=unit(vec(-w.y-rain.x+ray.x*t/earth_radius(),1,-w.z-rain.z+ray.z*t/earth_radius()));float viewCosine=dotv(n,ray),nv=fmaxf(.02f,-viewCosine);
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflection=minus(ray,scale(n,2*viewCosine));float3 reflected=camera[13].w!=0?weather_sky_sample(reflection,camera):sky(reflection,localSun);
- if(camera[21].w!=0)depth=fmaxf(.15f,-terrain_height(camera,terrain_world(camera,ray,t)));
+ if(camera[21].w!=0)depth=fmaxf(.15f,-terrain_ray_height(camera,ray,t));
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
- float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
- for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;BedRegionCache bedRegions=bed_cache(bx,bz);
+ for(int j=0;j<2;j++){travel=(cached_bottom(bx,bz,depth,bedRegions)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  float anchorX=bx,anchorZ=bz;float4 drift=make_float4(0,0,0,0);
  if(depth<3){float shallow=clamp01((3-depth)/2);shallow=shallow*shallow*(3-2*shallow);drift=sample_pc(sandState,bx/16,bz/16,0,1);drift.x*=shallow;drift.y*=shallow/16;drift.z*=shallow/16;}
- if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint,drift,anchorX,anchorZ)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
+ if(smooth!=0)for(int j=0;j<2;j++){travel=(bottom_pc(bx,bz,depth,pixelFootprint,drift,anchorX,anchorZ,bedRegions)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=vec(0,0,0);
  if(smooth!=0){float4 sand=sand_moving(bx,bz,pixelFootprint,drift,anchorX,anchorZ),stone=stone_relief(bx,bz,pixelFootprint,localSun);float3 bedSun=scale(refractv(scale(localSun,-1),n,.7502f),-1);bed=seabed_pc(bx,bz,pixelFootprint,sand,stone,bedSun,transmitted);}
  else bed=seabed(bx,bz,pixelFootprint);
@@ -1649,10 +1984,14 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float specPower=mixf(320,8000,1/(1+pixelFootprint*pixelFootprint*800));
  float spec=positive_power(fmaxf(0,dotv(n,halfv)),specPower)*3.5f*(specPower/8000);
  col=plus(col,scale(vec(1,.89f,.68f),spec*(camera[13].w!=0?camera[11].y*eased(-.02f,.08f,localSun.y):1)));
- float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);if(camera[13].w!=0)col=surface_weather(col,ray,camera,t);
+ float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);
+ if(view==0)col=craft_water(col,p,n,ray,camera,brush);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray,localSun);}
- if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT),planetMix);
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT,1.3f/((float)height*sampleScale)),planetMix);
+ // Apply the same air path after mixing near and distant water.
+ if(camera[13].w!=0)col=surface_weather(col,ray,camera,globeT>0?globeT:3000);
+ if(view==0)col=craft_spray(col,ray,camera,brush,globeT);
  col=scale(col,exposure*vignette);
  return col;
 }
@@ -1684,4 +2023,22 @@ __global__ void render_pc_single(const float4 *brush,const float4 *sandState,con
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float3 col=shade_pixel_pc(brush,sandState,surface,coefficients,light,monoLight,camera,width,height,depth,exposure,view,pressureActive,dispersion,lightSize,(float)x+.5f,(float)y+.5f,1);
  image[y*width+x]=pack_color(col);
+}
+
+// Diagnostic-only sampling; the test computes finite differences and tile
+// correlations outside the renderer, including the original periodic control.
+__global__ void appearance_probe(const float4 *coefficients,const float4 *camera,const float4 *points,float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];int mode=(int)p.z;
+ if(mode<2)output[i]=region_wave(coefficients,p.x,p.y,1,1,mode);
+ else if(mode<4)output[i]=sample_pc(coefficients,p.x,p.y,mode-2,1);
+ else if(mode==4)output[i]=sand_relief(p.x,p.y,.001f);
+ else if(mode==5)output[i]=bed_shape(p.x,p.y);
+ else if(mode==6)output[i]=globe_gradient(vec(p.x,p.y,p.w));
+ else if(mode==7){WaveRegionCache cache=wave_cache(p.x+p.w,p.y-p.w*.37f);output[i]=make_float4(cached_wave_height(coefficients,coefficients,coefficients,p.x,p.y,1,0,1,cache),0,0,0);}
+ else if(mode==9){BedRegionCache cache=bed_cache(p.x+p.w,p.y-p.w*.37f);output[i]=make_float4(cached_bottom(p.x,p.y,0,cache),0,0,0);}
+ else if(mode==10)output[i]=make_float4(cloud_visibility(p.x,vec(sqrtf(fmaxf(0,1-p.y*p.y)),p.y,0)),0,0,0);
+ else {
+  float lat=p.x*.0174532925f,lon=p.y*.0174532925f;float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
+  float cover=weather_map_sample(camera,n,0).x;output[i]=make_float4(cloud_column(camera,n,0,cover),cover,dotv(n,vec(camera[12].x,camera[12].y,camera[12].z)),0);
+ }
 }

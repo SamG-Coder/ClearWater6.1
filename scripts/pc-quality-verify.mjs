@@ -17,7 +17,7 @@ const completionSamples=page=>page.evaluate(()=>new Promise((resolve,reject)=>{
 try{
  const page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];
  page.on('pageerror',e=>errors.push(String(e)));
- await page.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?t=4&geology=study');
+ await page.goto((process.env.WATER_URL||'http://127.0.0.1:5191/')+'?mode=explorer&t=4&geology=study');
  await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
  assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
  assert.equal(await page.evaluate(()=>waterDiagnostics.pixelSamples),4);

@@ -41,6 +41,11 @@ jobs:
           node --check scripts/continent-verify.mjs
           node --check scripts/ship-verify.mjs
           node --check scripts/flight-verify.mjs
+          node --check scripts/appearance-verify.mjs
+          node --check scripts/altitude-audit.mjs
+          node --check scripts/space-effects-verify.mjs
+          node --check scripts/shoreline-verify.mjs
+          node --check scripts/horizon-verify.mjs
       - name: Compile CUDA kernels and build static site
         run: npm run build
       - uses: actions/upload-pages-artifact@v4

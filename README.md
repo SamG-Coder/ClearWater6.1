@@ -28,13 +28,20 @@ The original ship is generated entirely in `src/ship.cu`, with 126 separate comp
 - **Mouse wheel:** increase / decrease the thrust limit.
 - **V / Inspect ship:** orbit the craft without steering it.
 - **Space** in the toolbar moves to orbital altitude above the current location; **Ocean** returns to a surface preset.
+- **Moon** moves to a lunar approach for inspecting its phases and continuing free flight.
 - Phones use the movement joystick, screen-drag steering and altitude buttons. Portrait view automatically increases chase distance to keep both wings in frame.
 
 Steering uses damped angular response, velocity inertia, turn-driven banking and a short chase-camera lag. Releasing thrust coasts; braking settles the craft quickly. Boost smoothly increases exhaust output and camera distance.
 
+The level-flight assistant fades between 12 and 80 km. Outside the atmosphere, travel uses a Cartesian displacement and preserves the world heading, instead of following a constant-altitude Earth shell. Releasing thrust preserves cruising speed until braking; rise/descend follows the craft's up direction. Earth remains the navigation/render origin, but it no longer pulls a straight flight path around the globe. This is assisted free flight, not an orbital gravity simulation.
+
 Near the ocean, both engine pods apply altitude- and thrust-dependent pressure to the local FFT cascade. The surface depresses and sends ripples outward; existing displacement, normals and refraction respond. The pressure domain follows the craft by shifting the Fourier phase, preserving the wake instead of restarting it. A spatial taper suppresses neighboring periodic copies. Forces stop above the water-interaction range and over land; remaining waves decay. This is an artistic vectored-engine downwash approximation, not a fluid exhaust solver.
 
-This stage is a flight and spacecraft-rendering prototype. It has terrain clearance, but no landing sequence, walking character, combat, inventory or survival loop. Ship reflections/shadows are not yet integrated into the ocean surface. Self-shadowing uses mesh intersections; glass and exhaust lighting are approximations. PC keeps four spatial samples; the mobile profile uses the same mesh with one sample and the existing adaptive framebuffer.
+Downwash also produces irregular froth and bounded low spray. Booster light reflects off the perturbed water and illuminates nearby hull panels and nozzle rims. Red/green navigation lamps and cool landing strips emit light, with directional landing lamps turning on as daylight falls. These finite local lights use analytic shading, not a global light or shadow map.
+
+The Moon is a procedural sphere at a mean distance of 384,400 km and radius of 1,737.4 km, using [NASA's mean physical dimensions](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html). Its Sun-facing hemisphere reflects light; phase and terminator follow the same Sun as Earth, with faint Earthshine and an approximate Earth shadow. Its circular orbit and generated maria/craters are illustrative, not a real-date ephemeris or lunar terrain dataset.
+
+This stage is a flight and spacecraft-rendering prototype. It has Earth terrain clearance, but no lunar landing/collision system, walking character, combat, inventory or survival loop. Hull reflections/shadows are not yet integrated into the ocean surface. Self-shadowing uses mesh intersections; glass, spray and exhaust lighting are approximations. PC keeps four spatial samples; the mobile profile uses the same mesh with one sample and the existing adaptive framebuffer.
 
 `npm run test:ship` checks exact mirrored geometry, both upward stabilizers, BVH intersections against an independent brute-force triangle oracle, actual flight/bank/orbit/wheel controls, mouse lock, touch joystick/steering, surface/space solar-time continuity and actual 2560×1440 / 3840×2160 output. It saves screenshots and GPU timing results under `captures/`. `npm run test:flight` checks coast/brake/steering response, 30 versus 120 Hz consistency, near-water engine pressure, wake locality and decay after takeoff. Phone viewport emulation does not measure a physical phone GPU.
 
@@ -53,10 +60,10 @@ Water simulation, camera integration, ray generation, lighting, seabed materials
 - The renderer intersects the height field and refracts view rays using water's refractive index. Rays intersect a gently undulating procedural seabed with sand ripples and scattered stones.
 - Fresnel reflection, per-channel Beer-Lambert absorption, water scattering, and sun highlights shade the surface.
 - A 512 × 512 PC sunlight map (256 × 256 in Mobile and Performance) follows refracted rays to the mean-depth plane and estimates the photon mapping Jacobian. Area compression produces caustic focusing, with slightly different RGB indices of refraction. The map follows the short-wave cascade; the long cascade contributes surface shape and normals. This keeps the caustic tile periodic and bounded in cost.
-- A moving left-button drag is projected onto the water on the GPU. A Gaussian pressure path injects vertical velocity into a third complex spectral field, evolved with an analytic damped gravity-wave oscillator before the same inverse FFT. The wake changes surface height, normals, reflection and view-ray refraction, and persists after release. Stationary clicks and hover inject no force. The caustic photon map uses the background short-wave cascade; it does not include the interaction cascade. Interaction waves repeat every 24 m.
+- A moving left-button drag is projected onto the water on the GPU. A Gaussian pressure path injects vertical velocity into a third complex spectral field, evolved with an analytic damped gravity-wave oscillator before the same inverse FFT. The wake changes surface height, normals, reflection and view-ray refraction, and persists after release. Stationary clicks and hover inject no force. The caustic photon map uses the background short-wave cascade; it does not include the interaction cascade. The internal interaction spectrum spans 24 m; the world-space taper suppresses visible copies.
 - Camera state remains in a GPU buffer. CPU inputs supply motion and look axes. The render loop does not download simulation or pixel buffers; a small asynchronous camera/weather read updates the HUD.
 
-This is a height-field approximation. It has no overturning breakers, underwater camera, shoreline wetting, or volumetric multiple scattering. Forward photon transport accumulates overlapping refracted rays; the finite light-map resolution bounds the smallest visible caustic features. Spectral fields repeat at their patch lengths, and the caustic tile repeats every 6 m.
+This is a height-field approximation. It has no overturning breakers, underwater camera, shoreline wetting, or volumetric multiple scattering. Forward photon transport accumulates overlapping refracted rays; the finite light-map resolution bounds the smallest visible caustic features. The spectral buffers remain periodic internally. Smooth, seeded two-axis coordinate variation breaks their visible 6 m and 96 m copies; caustic lookup follows the short-wave coordinates. This is a bounded local appearance model, not an independent globe-sized spectral solve.
 
 ## Validation
 
@@ -95,6 +102,7 @@ Run `npm run test:optimization` with the server running. It compares mobile fram
 Depth-dependent dispersion and force envelopes are now cached and refreshed only when depth changes. Height-only intersection queries avoid evaluating unused slopes; underwater pixels skip unused direct-sky shading. Positive lighting powers use native float log2/exp2 math, so the render shader contains no software double-precision helpers. Mobile photons occupy a tightly packed single-channel working region, and the tent filter reads a shared 10×10 tile per 8×8 workgroup (100 global reads instead of 576). Compute and canvas transfer share one command submission. These changes retain the same resolution, FFT dimensions, ray count, filter weights, and shading parameters.
 
 To choose an older baseline, set `WATER_REFERENCE_COMMIT` before running `npm run test:optimization`. The script also checks high-wind shallow water and low-wind deep water. Reference sources come only from this repository's own Git history.
+
 The frequency cache uses packed float arrays (320 KiB), so background frequency reads are contiguous rather than padded float4 records. The force field is exactly zero before the first water drag; its FFT and oscillator dispatches are deferred until that drag. All three full-size fields remain allocated, and after activation the force field continues evolving every frame, including after release. No decay threshold or reduction in wave detail is used.
 
 The latest math reuse pass shares the surface/view dot product between Fresnel, reflection and refraction, the distance fade between normals and caustics, the pixel footprint between seabed filtering and highlights, and the vertical refraction denominator across bed intersections. Gravel outlines reuse one angular calculation. The existing GPU camera kernel computes depth-only optical attenuation once per frame in spare basis components, without another allocation or dispatch. Against `dbfa572`, six reference scenes were byte-identical. At 448 × 912 on desktop NVIDIA/Edge, 80 samples measured median GPU compute time of 0.060448 ms before and 0.059648 ms after (about 1.3% lower); this modest result is not a physical-phone benchmark.
@@ -133,13 +141,11 @@ The PC material shader is separate from the retained Mobile/Performance shading 
 
 The optimization verifier also checks that the lightweight render shader matches release `6860d41` after normalizing generated temporary names and whitespace. Local NVIDIA/Edge measurements for this material pass were approximately 4.1 ms at 1440p and 8.4 ms at 4K GPU compute. The heavy 4K test was around 12 ms GPU compute and 13-14 ms frame completion, so further PC quality increases should follow another optimization pass. These are local measurements, not a physical-phone or universal PC guarantee.
 
-
 ## FFT-driven shallow sand
 
 PC quality profiles retain a small 128 by 128 sediment phase field on the GPU (256 KiB). A CUDA transport pass integrates the resolved long-wave FFT, depth-attenuated short waves and interactive pressure waves. Its response fades smoothly with depth and stops at 3 metres. Integration uses elapsed time, pauses with the simulation, and keeps its state between frames. Continuous-curvature sampling warps the sand ridges; the same deformation enters bed intersections and analytic lighting normals. Gravel remains anchored.
 
 This is a visual sediment transport approximation, not a sediment mass conservation or full coastal morphology solver. Mobile and Performance retain their existing shader and do not allocate the sediment field unless a PC quality profile is selected. No extra FFT is required. The PC verifier checks actual FFT forcing against flat-water, deep-water and zero-timestep controls, then compares sand before and after live evolution with water frozen at the same simulation instant.
-
 
 ## Local interaction and regional wave variation
 
@@ -150,7 +156,6 @@ Background short waves use deterministic per-region random phase offsets, blende
 `waterLab.domainTest()` queries real GPU fields: a live local wake remains nonzero, its copy 24 metres away is exactly zero, and an untapered negative control reproduces the old ghost. It also checks regional variation and analytic gradients at region/taper boundaries. Force and mobile interaction tests exercise these checks alongside existing controls. Mobile images intentionally differ from the earlier uniform tiling release.
 
 The optimization regression baseline is now `0bb6aea`, the first local-interaction/regional-variation release. Future optimization passes must again preserve its mobile images and normalized shader operations exactly; the baseline update accepts the requested feature change rather than removing the checks.
-
 
 ## Earth-scale ocean and space flight
 
@@ -170,7 +175,6 @@ The camera follows great-circle steps and transports its local frame across pole
 
 The Earth-scale release resets the image/shader optimization baseline to `812431b`. This accepts the requested spherical renderer and preserves its new Mobile/Performance imagery for subsequent optimization work.
 
-
 ## Rotating globe and dynamic weather
 
 Open **Globe weather** to change the simulated clock or season. **Visit a rain system** flies to a rainy cell on the same global map seen from orbit. Pause freezes waves, rain, cloud motion and the clock while leaving the camera usable. **Fixed sunlight study** restores the earlier lighting/wind study for comparisons.
@@ -183,7 +187,7 @@ Wind is projected into the transported local camera frame and changes the FFT sp
 
 A bounded 3D cloud volume from 0.8 to 8.2 km uses the same global coverage and density structure as near-water solar attenuation. The reflection cache uses a cheaper two-deck approximation. The local Sun drives caustic transport, submerged lighting, highlights and reflections. Rain has wind-slanted world-space streaks, distance haze and small analytic impact normals. These are visual approximations: cloud lighting uses approximate vertical self-shadowing, rainfall does not solve a separate fluid volume, and local cloud shadowing is represented over the nearby water patch. The bounded FFT/detail chart remains a local approximation rather than a stored globe-wide ocean state.
 
-The global field is cached at 256 × 128 on PC and 128 × 64 on Mobile. The hemispherical sky/reflection cache is 512 × 128 on PC and 256 × 64 on Mobile. A separate view cache integrates the visible cloud volume with 24 PC or 12 mobile samples, at half the water resolution capped at a 1920-pixel long edge on PC or 960 on phones. Premultiplied opacity is reconstructed over the full-resolution ocean and atmosphere. Clouds are filtered with altitude; both caches refresh at 10 Hz or immediately for camera/setting changes. Orbital rendering skips the surface reflection-cache calculation. Shared camera/weather/sky/view storage reserves approximately 66 MiB on desktop or 18 MiB on touch devices, plus 128 KiB of wave-energy memory. Shared storage keeps PC rendering within WebGPU's portable eight-storage-buffer limit. Water detail, FFT dimensions and PC spatial sampling are retained.
+The global field is cached at 256 × 128 on PC and 128 × 64 on Mobile. The hemispherical sky/reflection cache is 512 × 128 on PC and 256 × 64 on Mobile. A separate view cache integrates the visible cloud volume with 32 PC or 12 mobile samples, at half the water resolution capped at a 1920-pixel long edge on PC or 960 on phones. Premultiplied opacity is reconstructed over the full-resolution ocean and atmosphere. Cloud detail is filtered by the integration footprint without changing the underlying density field with camera altitude; both caches refresh at 10 Hz or immediately for camera/setting changes. Orbital rendering skips the surface reflection-cache calculation. Shared camera/weather/sky/view storage reserves approximately 66 MiB on desktop or 18 MiB on touch devices, plus 128 KiB of wave-energy memory. Shared storage keeps PC rendering within WebGPU's portable eight-storage-buffer limit. Water detail, FFT dimensions and PC spatial sampling are retained.
 
 Run `npm run test:weather` for solar-period/season checks, both poles and longitude continuity, wind-belt/tangent-vector checks, evolving global conditions, an actual visit to rain, FFT wind coupling with a disabled-weather negative control, pixel-identical pause, pointer-lock success/refusal handling, and real 1440p/4K measurements. `benchmark(samples, true)` measures an advancing scene, including weather and sky-cache work when due; its GPU timestamps still exclude canvas transfer and physical presentation. Phone captures emulate viewport/touch behavior on desktop NVIDIA hardware and do not establish Samsung or Safari GPU performance.
 
@@ -192,7 +196,6 @@ Click **Fly camera** to lock the mouse. The button and status message confirm **
 Distant water uses wind-dependent rough reflection, broad solar glints, and footprint-filtered irregular swell shading. The atmosphere uses 12 PC or 8 mobile integration samples, with denser sampling near the ground in orbital views. Ocean, atmospheric limb, and stars remain at the selected output resolution; the expensive cloud volume uses its separate cache.
 
 The weather release resets the image/shader optimization baseline to `95085db`. It accepts the new moving sunlight, weather response, clouds and distant shading while preserving exact image comparisons for later optimization passes.
-
 
 ## Plate-based globe depths
 
@@ -206,7 +209,6 @@ CUDA builds a 1024 × 512 depth/crust/boundary cache on desktop, or 512 × 256 o
 
 The plate-depth release sets the image/shader optimization baseline to `efd7771`, accepting the generated depth field and phase-preserving dispersion changes.
 
-
 ## Raised continents and coastal flight
 
 The default globe now renders the generated continents above sea level. **Continents & seafloor → Visit highlands** places the camera over a sunlit inland region. **Shallows** returns to a generated coast; **Space** shows the whole world. Changing the seed changes plates, basins, coastlines and landforms together. No external maps, models or image textures are used.
@@ -218,7 +220,6 @@ This is the first procedural continent implementation. It has no erosion/river s
 Maximum-height pyramids add about 2.67 MiB / 0.67 MiB to the global terrain cache and 5.33 MiB / 1.33 MiB to the local cache. Shared camera, weather and terrain storage now reserves about 98 MiB on desktop or 26 MiB on touch devices. A separate full-resolution intersection pass stores one depth per PC subpixel, with geographic bounds and starting estimates shared across 8×8 screen tiles. Each ray refines its own hit and falls back to a fresh search if refinement fails. Height and slope calculations share the same fetched samples. This preserves four spatial samples at actual 4K, using about 127.6 MiB for intersection and tile data; the single-sample 448×912 mobile case uses about 1.61 MiB. Allocations respect the device storage-binding limit. Shader pipelines for inactive profiles and diagnostic probes are created only when needed.
 
 `npm run test:continents` compares 1536 screen and horizon rays with a separate 1024-interval reference trace, including an intentionally coarse negative control and checks actual land intersections against independently reconstructed double-precision spherical points, a vertical-distance oracle, ground clearance, rejected dry-land water forces, stable terrain under camera rotation and cache recentering, the Highlands control, default coast/orbit/night screenshots, and real 1440p/4K render sizes. `npm run test:geology` retains the seed, plate, seam, depth and wave-dispersion checks. Published builds also receive a browser smoke check after Pages finishes deploying.
-
 
 The 2026-10-02 continent checkpoint measured the following on desktop NVIDIA Blackwell with Edge. These are median / p95 **GPU compute milliseconds**, including advancing water/weather and cache refreshes when due; they exclude canvas copy and physical display. Near views use 30 timing samples, orbital views 40, with all four PC spatial samples retained.
 
@@ -233,3 +234,31 @@ Close terrain still exceeds a 60 FPS budget at these high resolutions and needs 
 All sampled hit masks matched the dense reference. Maximum hit-distance differences were 0.045 m at the coast and 0.576 m in the highlands. The coarse negative control disagreed on 14 rays, demonstrating that the test detects skipped foreground ridges. The local height cache differed from direct evaluation by 0.095 m RMS / 0.270 m maximum at the sampled points; recentering after flight changed those heights by at most 0.092 m. These are measured checks for the supplied scenes, not global error bounds for every seed or grazing ray.
 
 The continent release sets the image/shader optimization baseline to `28b4d13`. This accepts the requested raised terrain and coastal rendering changes, then preserves their Mobile/Performance images and normalized shader operations for subsequent optimization work.
+
+## Appearance through a flight descent
+
+Both background FFT cascades now use seeded two-axis phase variation with analytic Jacobians, while engine/touch pressure remains confined to its one local world domain. The warp matches at the 6144 m navigation-chart wrap. Ray iterations cache the region corners and re-evaluate the exact quintic interpolation, with a fallback when crossing a cell. This avoids repeatedly hashing the same corners without approximating the surface. Sand uses seeded bed undulations and branching ripple families, retaining its shallow-water FFT sediment response and differentiated geometric normals.
+
+Distant water uses rotated gradient fields and longer swells instead of two coherent sine bands. Weather reflections blend across flight heights, and rain haze is applied after the near/far water blend to remove the visible circular transition. Cloud octaves rotate and bend independently; kilometre-scale formations create gaps within weather systems, and 3D erosion shapes their tops. Unresolved formations are filtered by the ray footprint. The 32 PC / 12 mobile integration samples concentrate toward nearby volume, with stratified sample positions to break aligned layers; wide steps filter fine erosion. Cloud haze uses the volume entry bounds instead of a fixed middle shell, removing the tangent seam when flying inside the layer. A separable filter cleans the premultiplied low-resolution cloud cache before compositing, using five taps per axis on PC and three on mobile. Its scratch buffer follows the actual cloud dimensions. PC adds eight cloud samples. Mobile cloud samples, FFT sizes, water ray budgets and screen-resolution profiles are unchanged.
+
+`npm run test:altitudes` captures orbit, the generated coast, a continuous 12 km-to-6 m descent through a real rain system, a cloud-formation location and close sand. Set `AUDIT_TIMINGS=1` to additionally measure advancing cloud/ship views at 1440p and 4K. `npm run test:appearance` checks analytic derivatives against independently differenced heights, compares both FFT cascades across their former tile distances with an unwarped negative control, tests chart wrapping and sediment response, and renders real 2560 x 1440 / 3840 x 2160 frames. Set `WATER_REFERENCE_URL` to a previous deployed build to collect matching before/after timings. Mobile checks emulate a touch viewport on the desktop GPU.
+
+Before the additional spacecraft lights, lunar rendering and extended distant swells, the appearance pass was checked with independent field derivatives, old-tile negative controls, a continuous descent, PC four-sample rendering, 4K high-energy/pressure stress, and local engine-wash regression. Reusing wave and bed region corners retained identical water pixels outside the changing HUD in matched 1440p/4K screenshots. In the 40-sample static manual-depth water benchmark on desktop NVIDIA/Edge, this reduced the initial new-detail pass from 12.99 / 29.21 ms to 11.53 / 25.45 ms (1440p / 4K GPU compute). The preceding published build measured 9.97 / 20.72 ms, so the extra detail still has a cost. These timings exclude display latency and are not phone measurements or a guarantee for every flight view.
+
+`npm run test:space-effects` checks a free-space trajectory against an independent Cartesian direction, momentum and braking, bounded local light/foam response, lunar radius/distance and ray intersections, and Sun-facing versus dark lunar radiance. It captures daylight/night engine wash and the lunar approach at real 1440p and 4K.
+
+## Shoreline and close terrain
+
+The spacecraft uses separate navigation and rendering frames. Its precise navigation remains at the ship, while the Earth, weather and terrain rays originate at the actual chase-camera eye. This fixes the previous horizontal offset of up to one chase-camera radius when rotating near a coast. The one-invocation eye transform uses double precision; terrain and material shaders remain float32. Beach material grain is Earth-fixed rather than attached to the camera chart. The eye origin is split once on the GPU and fine terrain is evaluated with small relative distances, avoiding visible sub-metre quantization from planet-scale float coordinates.
+
+A nested 2048 m terrain patch adds world-space relief above the shore, with 4 m samples on PC and 8 m on touch devices. It updates after 256 m of travel or a geography change, not on camera rotation. Four Hermite sample records provide height and analytic slope together; the outer patch blends into the existing 32 km terrain cache. Detail fades out at sea level so the shore shares the existing ocean/land boundary. Conservative ray bounds include the added relief, and wet sand darkens near sea level. The extra patch buffers use 8 MiB on PC and 2 MiB on touch devices.
+
+`npm run test:shoreline` compares the actual chase-eye position to an independent Earth-centred calculation, rotates the ship camera over both wet and dry shoreline locations, compares accelerated pixel hits with a dense first-crossing ray oracle, checks fixed terrain points and cache rebuild counts, and captures real 1440p/4K output.
+
+The final shoreline rotation audit checked 4,608 screen rays over twelve wet/dry camera poses, with no hit-mask disagreements. The old chase-eye error was 21.5-25.7 m; the corrected sampled error was 0.06-0.16 m. All 81 fixed terrain samples were identical across dry-beach rotations, with no patch rebuild. The dry-beach dense-reference distance error was at most 0.164 m (0.026% relative). These are sampled scene results, not an error bound for all terrain.
+
+During this pass, correcting relative-coordinate precision and combining the Hermite evaluation reduced the matched dry-beach animated GPU median from 27.64 to 21.39 ms at 2560 x 1440, and 48.70 to 36.76 ms at 3840 x 2160. This comparison is against the initial new-detail implementation, not the earlier published build. Final wet-shore ship medians were 28.16 / 50.49 ms; the pre-shore-change view was 25.18 / 46.85 ms, so the complete quality pass still has a cost. Explorer coast medians were 22.45 / 42.34 ms and highlands 24.43 / 44.86 ms. PC used four spatial samples. All timings are desktop NVIDIA/Edge GPU compute, excluding browser presentation; they are not physical-phone results or a 60 FPS claim at 4K.
+
+`npm run test:horizon` samples cloud visibility across the old tangent discontinuity, includes an independent reproduction of the old fault as a negative control, and captures flight above/below both cloud bounds and around the former 1600 m seam. It also measures actual 1440p/4K cloud-flight frames.
+
+The final horizon test passed 1,032 visibility samples and eight captured altitudes. Its 3.5 km cloud-flight medians were 6.30 / 11.99 ms at 1440p / 4K on the same desktop GPU. The Moon test measured a 4,857 km straight flight with 48 m cross-track deviation, retained coasting momentum, verified braking and found no GPU errors. Lunar rendering remains a procedural approximation with no landing collision.

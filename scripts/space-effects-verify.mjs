@@ -1,0 +1,44 @@
+import {chromium} from 'playwright';
+import assert from 'node:assert/strict';
+import {mkdir,writeFile} from 'node:fs/promises';
+const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-webgpu']});
+const base=process.env.WATER_URL||'http://127.0.0.1:5191/',errors=[],report={};
+const dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0),sub=(a,b)=>a.map((x,i)=>x-b[i]),length=a=>Math.hypot(...a),unit=a=>a.map(x=>x/length(a));
+const quality=async(page,w)=>{await page.locator('#quality').evaluate((e,w)=>{e.value=String(w);e.dispatchEvent(new Event('change'));},w);await page.evaluate(()=>waterLab.seek(4));};
+const state=page=>page.evaluate(async()=>({ship:await waterLab.shipState(),planet:await waterLab.planetState(),weather:await waterLab.weatherState()}));
+const position=s=>s.planet.navigation.slice(0,3).map(x=>x*(6371000+s.ship.position[1]));
+const world=(s,v)=>s.weather.frame.east.map((x,i)=>x*v[0]+s.weather.frame.normal[i]*v[1]+s.weather.frame.back[i]*v[2]);
+try{
+ await mkdir('captures',{recursive:true});
+ const page=await browser.newPage({viewport:{width:2560,height:1440}});page.on('pageerror',e=>errors.push(String(e)));
+ await page.goto(base+'?mode=ship&t=4&geology=study');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:180000});assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
+ await quality(page,768);
+ await page.evaluate(()=>waterLab.shipAltitude(8000000));const start=await state(page),heading=world(start,[0,0,-1]);
+ await page.evaluate(()=>waterLab.shipAdvance(180,1/60,{forward:1}));const travelled=await state(page),delta=sub(position(travelled),position(start)),along=dot(delta,heading),cross=length(delta.map((x,i)=>x-heading[i]*along));
+ assert.ok(travelled.ship.position[1]>start.ship.position[1]+100000,'Tangent thrust in space must leave the original Earth shell');
+ assert.ok(cross<length(delta)*.003+50,`Free flight bent toward Earth: ${cross} m across ${length(delta)} m`);
+ await page.evaluate(()=>waterLab.shipAdvance(120,1/60));const coast=await state(page);assert.ok(coast.ship.speed>travelled.ship.speed*.98,'Space flight must preserve coasting momentum');
+ await page.evaluate(()=>waterLab.shipAdvance(60,1/60,{forward:-1}));const brake=await state(page);assert.ok(brake.ship.speed<coast.ship.speed*.03);
+ report.flight={distance:length(delta),crossTrackError:cross,startAltitude:start.ship.position[1],endAltitude:travelled.ship.position[1],thrustSpeed:travelled.ship.speed,coastSpeed:coast.ship.speed,brakedSpeed:brake.ship.speed};console.log('Space trajectory',report.flight);
+ await page.locator('#shipSurface').click();await page.evaluate(()=>waterLab.seek(4));await page.evaluate(()=>waterLab.weatherLocation(0,0,6));await page.evaluate(()=>waterLab.shipAltitude(6));await page.evaluate(()=>waterLab.weatherSeek(50400));
+ await page.evaluate(()=>waterLab.shipAdvance(150,1/60));await quality(page,2560);await page.evaluate(()=>waterLab.shipView(.38,.78,28));
+ const sources=await page.evaluate(()=>waterLab.shipWashState()),points=sources.engines.map(e=>[e[0],0,e[1],0]);
+ points.push([sources.domain[0]+70,0,sources.domain[1]+70,0],[-4.65,.22,4.8,1],[4.65,.22,4.8,1]);
+ const day=await page.evaluate(p=>waterLab.shipEffectSamples(p),points);assert.ok(day.every(Number.isFinite));assert.deepEqual(day.slice(8,11),[0,0,0],'Local lights and froth must have finite spatial extent');assert.ok(day[2]>0&&day[6]>0&&day[14]>.05&&day[18]>.05);
+ await page.screenshot({path:'captures/flight-wash-day-2560.png'});
+ await page.evaluate(()=>waterLab.weatherSeek(7200));const night=await page.evaluate(p=>waterLab.shipEffectSamples(p),points);assert.ok(night[2]>0&&night[6]>0);await page.screenshot({path:'captures/flight-wash-night-2560.png'});
+ report.effects={day,night,sources};console.log('Local effects finite and confined');
+ await page.locator('#shipMoon').click();await page.evaluate(()=>waterLab.seek(4));await page.evaluate(()=>waterLab.shipView(0,.03,22));
+ const celestial=await page.evaluate(()=>waterLab.celestialState()),toMoon=sub(celestial.moon,Object.values(celestial.eye)),moonRay=unit(toMoon),sun=unit(celestial.sun);
+ const rays=[moonRay.concat(0),moonRay.map(x=>-x).concat(0),sun.concat(1),sun.map(x=>-x).concat(1)];
+ const probe=await page.evaluate(p=>waterLab.celestialSamples(p),rays);assert.ok(probe.every(Number.isFinite));
+ assert.ok(Math.abs(length(celestial.moon)-384400000)<200,'Moon must be at mean Earth distance');assert.ok(Math.abs(probe[3]-(length(toMoon)-1737400))<100,'Moon intersection must match independent ray/sphere centre oracle');assert.equal(probe[7],-1);
+ assert.ok(probe[8]>probe[12]*100+.05,'Sun-facing lunar material must be brighter than its unlit hemisphere');assert.ok(probe[11]>.99999&&probe[15]<1e-6);
+ report.moon={...celestial,probe,centreRayDistanceError:probe[3]-(length(toMoon)-1737400)};console.log('Moon lighting and geometry',report.moon);
+ await page.screenshot({path:'captures/flight-moon-2560.png'});
+ report.timings=[];
+ for(const [width,height] of [[2560,1440],[3840,2160]]){await page.setViewportSize({width,height});await quality(page,width);assert.deepEqual(await page.evaluate(()=>[waterDiagnostics.width,waterDiagnostics.height,waterDiagnostics.pixelSamples]),[width,height,4]);report.timings.push(await page.evaluate(()=>waterLab.benchmark(30)));await page.screenshot({path:`captures/flight-moon-${width}.png`});}
+ await page.locator('#shipSurface').click();await page.evaluate(()=>waterLab.seek(4));assert.ok((await state(page)).ship.position[1]<2000,'Ocean control must return from lunar distance');
+ assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);assert.deepEqual(errors,[]);report.errors=errors;
+ await writeFile('captures/space-effects-validation.json',JSON.stringify(report,null,2));console.log('Space, Moon and engine effects passed');
+}finally{await browser.close();}

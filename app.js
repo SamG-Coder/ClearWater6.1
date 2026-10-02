@@ -9,8 +9,9 @@ const mapSize=()=>pcQuality()?512:256;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
 let visitRain=false,visitTerrain=false;
-let geometryBytes=0,profileSkip=0;
+let geometryBytes=0,profileSkip=0,cloudScratch,cloudStorageBytes=0;
 let plates,geologySeed=-1,geologySize=0;const geologyOffset=131104+(touchDevice?1048576:4194304),terrainWidth=touchDevice?512:1024,terrainOffset=geologyOffset+Math.ceil((touchDevice?512*256:1024*512)*4/3)+32;
+const nearTerrainWidth=touchDevice?256:512,nearTerrainOffset=terrainOffset+Math.ceil(terrainWidth*terrainWidth*4/3)+32;
 let seaMemory,weatherClock=14*3600,weatherSeason=172,weatherDirty=true,weatherRefresh=0,weatherMapAt=-Infinity,weatherSkyAt=-Infinity,lastWeatherMode=-1,weatherSize=0,zoomTail=false;
 let kernelArtifacts;const kernelLoads=new Map();
 let navigation,zoomDelta=0,sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
@@ -37,6 +38,7 @@ $('pause').onclick=()=>{playing=!playing;$('pause').textContent=playing?'Pause':
 $('findRain').onclick=()=>{visitRain=true;reset=0;weatherDirty=true;weatherRefresh=1;};
 $('highlands').onclick=()=>{visitTerrain=true;reset=0;$('depthMode').value='1';weatherDirty=true;};
 $('space').onclick=()=>{if(shipMode)shipAction=3;else reset=3;zoomDelta=0;};
+$('shipMoon').onclick=()=>{shipAction=4;weatherDirty=true;canvas.focus({preventScroll:true});};
 $('shipSpace').onclick=()=>{shipAction=3;weatherDirty=true;canvas.focus({preventScroll:true});};
 $('shipSurface').onclick=()=>{reset=1;shipAction=1;weatherDirty=true;canvas.focus({preventScroll:true});};
 $('shipInspect').onclick=()=>{shipInspect=!shipInspect;$('shipInspect').textContent=shipInspect?'Return to flight · V':'Inspect ship · V';$('shipModeLabel').textContent=shipInspect?'INSPECTING CRAFT':'THIRD-PERSON FLIGHT';weatherDirty=true;canvas.focus({preventScroll:true});};
@@ -135,11 +137,15 @@ function resize(){
  const w=Math.max(64,Math.floor(Math.min(desiredWidth,Math.sqrt((pixelLimit-8192)*aspect))/64)*64),h=Math.max(8,Math.round(w/aspect/8)*8);
  const needed=(w*h*samples+2*Math.ceil(w/8)*Math.ceil(h/8)+(mobile?texels:0))*4;
  if(needed!==geometryBytes){runtime.destroyBuffer(monoLight);monoLight=runtime.createBuffer(needed);geometryBytes=needed;diagnostics.geometryStorageBytes=needed-(mobile?texels*4:0);kernels.caustic_resolve.clear();kernels.terrain_intersections.clear();kernels.terrain_tile_heights.clear();kernels.weather_cloud_view.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();}
+ const cloudScale=Math.min(.5,(touchDevice||mobile?960:1920)/Math.max(w,h)),cloudWidth=Math.max(8,Math.ceil(w*cloudScale/8)*8),cloudHeight=Math.max(8,Math.ceil(h*cloudScale/8)*8),cloudBytes=cloudWidth*cloudHeight*16;
+ if(cloudBytes!==cloudStorageBytes){if(cloudScratch)runtime.destroyBuffer(cloudScratch);cloudScratch=runtime.createBuffer(cloudBytes);cloudStorageBytes=cloudBytes;kernels.weather_cloud_filter.clear();}
+ diagnostics.cloudWidth=cloudWidth;diagnostics.cloudHeight=cloudHeight;diagnostics.cloudFilterBytes=cloudBytes;diagnostics.nearTerrainSpacing=2048/nearTerrainWidth;diagnostics.nearTerrainBytes=nearTerrainWidth*nearTerrainWidth*32+128;
  diagnostics.mobile=mobile;diagnostics.targetFps=mobile?30:60;diagnostics.adaptiveScale=adaptiveScale;diagnostics.photonRays=mobile?256:(pcQuality()?1024:512);
  if(w===width&&h===height)return;weatherDirty=true;
  if(image)runtime.destroyBuffer(image);width=w;height=h;canvas.width=w;canvas.height=h;image=runtime.createBuffer(w*h*4);
  context.configure({device:runtime.device,format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT,alphaMode:'opaque'});
  diagnostics.width=w;diagnostics.height=h;kernels.ship_render.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();
+ updateMetrics();
 }
 function qualityKernels(){return [...(mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render']),...(shipMode?['ship_step','ship_wash_pick','ship_wash_modes','ship_render','ship_mesh','ship_bounds']:[])];}
 async function ensureKernels(names){
@@ -180,16 +186,20 @@ function compute(dt,timestampWrites){
  if(shipMode)b.dispatch(bind('ship_step',{camera,navigationState:navigation,ship:shipData},{deltaTime:playing?dt:0,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),turn:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),rise:Math.max(-1,Math.min(1,axis('KeyE','KeyQ')+(keys.has('Space')?1:0))),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed,boost:keys.has('ShiftLeft')||keys.has('ShiftRight')?1:0,action:shipAction,inspect:shipInspect?1:0,depth,aspect:width/height}),[1,1,1]);
  else b.dispatch(bind('camera_step',{camera,navigationState:navigation},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),zoom:zoomDelta,reset,depth}),[1,1,1]);
  shipAction=0;zoomDelta=0;reset=0;lookX=lookY=0;
- b.dispatch(bind('terrain_cache_setup',{camera},{width:terrainWidth,offset:terrainOffset,enabled:geoEnabled}),[1,1,1]);
+ b.dispatch(bind('terrain_cache_setup',{camera},{width:terrainWidth,offset:terrainOffset,enabled:geoEnabled,nearWidth:nearTerrainWidth,nearOffset:nearTerrainOffset}),[1,1,1]);
  b.dispatch(bind('terrain_cache',{camera},{width:terrainWidth}),[terrainWidth/8,terrainWidth/8,1]);
  for(let level=1;terrainWidth/2**level>=1;level++)b.dispatch(bind('terrain_cache_mip',{camera},{width:terrainWidth,level}),[Math.ceil(terrainWidth/2**level/8),Math.ceil(terrainWidth/2**level/8),1]);
+ b.dispatch(bind('terrain_near_cache',{camera},{width:nearTerrainWidth}),[nearTerrainWidth/8,nearTerrainWidth/8,1]);
+ b.dispatch(bind('terrain_near_coefficients',{camera},{width:nearTerrainWidth}),[nearTerrainWidth/8,nearTerrainWidth/8,1]);
  b.dispatch(bind('geology_update',{camera},{depth,enabled:geoEnabled}),[1,1,1]);
+ b.dispatch(bind('terrain_camera_frame',{camera,navigationState:navigation}),[1,1,1]);
  b.dispatch(bind('weather_update',{camera},{clock:weatherClock,season:weatherSeason,time,dt:weatherDt,baseWind:wind,enabled:weatherEnabled,mapSize:mapResolution,skyWidth,refresh:weatherRefresh}),[1,1,1]);
  if(geoEnabled&&!(profileSkip&4))b.dispatch(bind('terrain_tile_heights',{camera,hits:monoLight},{width,height,samples,offset:mobileProfile()?lightSize*lightSize:0}),[Math.ceil(width/64),Math.ceil(height/64),1]);
  if(weatherEnabled&&(weatherDirty||moving||time-weatherSkyAt>=.1||time<weatherSkyAt)){
   b.dispatch(bind('weather_sky',{camera},{skyWidth}),[skyWidth/8,skyWidth/32,1]);
-  const cloudScale=Math.min(.5,(touchDevice||mobileProfile()?960:1920)/Math.max(width,height)),cloudWidth=Math.max(8,Math.ceil(width*cloudScale/8)*8),cloudHeight=Math.max(8,Math.ceil(height*cloudScale/8)*8);
+  const {cloudWidth,cloudHeight}=diagnostics;
   b.dispatch(bind('weather_cloud_view',{camera,hits:monoLight},{cloudWidth,cloudHeight,aspect:width/height}),[cloudWidth/8,cloudHeight/8,1]);diagnostics.cloudWidth=cloudWidth;diagnostics.cloudHeight=cloudHeight;weatherSkyAt=time;diagnostics.weatherSkyUpdates=(diagnostics.weatherSkyUpdates||0)+1;
+  for(let axis=0;axis<2;axis++)b.dispatch(bind('weather_cloud_filter',{camera,scratch:cloudScratch},{width:cloudWidth,height:cloudHeight,axis}),[cloudWidth/8,cloudHeight/8,1]);
  }
  weatherDirty=false;weatherRefresh=0;lastWeatherMode=weatherEnabled;weatherSize=mapResolution;diagnostics.weatherClock=weatherClock;diagnostics.weatherEnabled=weatherEnabled===1;
  if(shipMode)b.dispatch(bind('ship_wash_pick',{camera,ship:shipData,brush}),[1,1,1]);
@@ -235,9 +245,12 @@ async function exclusive(fn){busy=true;try{await runtime.idle();await ensureKern
 window.waterLab={
  async shipCost(samples=30){let full,water;try{profileSkip=0;full=await waterLab.benchmark(samples);profileSkip=8;water=await waterLab.benchmark(samples);}finally{profileSkip=0;}return {full,water,scope:'Sequential full-scene measurements with and without the ship render pass; not an isolated per-pass timing'};},
  async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[39],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:126};});},
- async shipView(yaw=.34,elevation=.3,distance=22){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([yaw,elevation,distance,1]));shipInspect=true;weatherDirty=true;compute(0);await runtime.idle();});},
- async shipAltitude(metres){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,4,new Float32Array([metres]));weatherDirty=true;compute(0);await runtime.idle();});},
+ async shipView(yaw=.34,elevation=.3,distance=22){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([yaw,elevation,distance,1]));shipInspect=true;weatherDirty=true;compute(0);await runtime.idle();const c=await runtime.read(camera,Float32Array,320);diagnostics.altitude=c[1];diagnostics.shipAltitude=c[76];diagnostics.flightSpeed=c[77];updateMetrics();});},
+ async shipAltitude(metres){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,4,new Float32Array([metres]));weatherDirty=true;compute(0);await runtime.idle();const state=await runtime.read(shipData);diagnostics.shipAltitude=state[1];diagnostics.flightSpeed=state[39];updateMetrics();});},
  async shipWashState(){return exclusive(async()=>{const data=await runtime.read(brush);return {pointer:Array.from(data.slice(0,4)),domain:Array.from(data.slice(8,12)),shift:Array.from(data.slice(12,16)),engines:[Array.from(data.slice(16,20)),Array.from(data.slice(20,24))]};});},
+ async celestialState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,320);return {moon:[c[31],c[39],c[75]],sun:Array.from(c.slice(48,51)),eye:c.slice(24,27).map(x=>x*(6371000+c[1])),radius:1737400};});},
+ async celestialSamples(points){return exclusive(async()=>{await ensureKernels(['celestial_probe']);const input=runtime.createBuffer(Float32Array.from(points.flat())),output=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('celestial_probe',{camera,points:input,output},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(output));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(output);kernels.celestial_probe.clear();}});},
+ async shipEffectSamples(points){return exclusive(async()=>{await ensureKernels(['ship_effect_probe']);const input=runtime.createBuffer(Float32Array.from(points.flat())),output=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('ship_effect_probe',{camera,ship:shipData,brush,points:input,output},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(output));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(output);kernels.ship_effect_probe.clear();}});},
  // Deterministic diagnostic stepping uses the same input/dispatch path as play.
  async shipAdvance(frames=60,dt=1/60,input={}){return exclusive(async()=>{
   playing=true;shipInspect=false;keys.clear();sticks.move.x=input.turn||0;sticks.move.y=-(input.forward||0);
@@ -259,10 +272,11 @@ window.waterLab={
  });},
  async shipGeometry(){return exclusive(async()=>{const vertices=await runtime.read(shipMesh),bounds=await runtime.read(shipBounds);let triangles=0;for(let t=0;t<71680;t++){const a=t*24,e=[vertices[a+4]-vertices[a],vertices[a+5]-vertices[a+1],vertices[a+6]-vertices[a+2]],f=[vertices[a+8]-vertices[a],vertices[a+9]-vertices[a+1],vertices[a+10]-vertices[a+2]];if(Math.hypot(e[1]*f[2]-e[2]*f[1],e[2]*f[0]-e[0]*f[2],e[0]*f[1]-e[1]*f[0])>1e-8)triangles++;}let symmetryError=0;for(let component=0;component<48;component++)for(let t=0;t<512;t++)for(let v=0;v<3;v++){const l=(6144+(component+32)*512+t)*24+v*4,r=(6144+(component+80)*512+t)*24+v*4;symmetryError=Math.max(symmetryError,Math.abs(vertices[l]+vertices[r]),Math.abs(vertices[l+1]-vertices[r+1]),Math.abs(vertices[l+2]-vertices[r+2]));}const finBounds=[43,91].map(i=>Array.from(bounds.slice((255+1024+i*85)*8,(255+1024+i*85)*8+8)));return {finite:vertices.every(Number.isFinite)&&bounds.every(Number.isFinite),triangles,symmetryError,finBounds,bounds:Array.from(bounds.slice(0,8))};});},
  async terrainScreenTest(points){return exclusive(async()=>{await ensureKernels(['terrain_screen_probe']);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('terrain_screen_probe',{points:input,camera,hits:monoLight,output:out},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.terrain_screen_probe.clear();}});},
+ async nearTerrainState(){return exclusive(async()=>({header:Array.from(await runtime.read(camera,Float32Array,64,nearTerrainOffset*16)),spacing:2048/nearTerrainWidth,bytes:diagnostics.nearTerrainBytes}));},
  async terrainBounds(enabled){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,508,new Float32Array([enabled?0:1]));weatherDirty=true;compute(0);await runtime.idle();});},
  async profileStages(){const out={};try{for(const [name,mask] of [['full',0],['withoutTerrainIntersections',1],['withoutShading',2],['withoutTerrainTiles',4]]){profileSkip=mask;out[name]=await waterLab.benchmark(20);}}finally{profileSkip=0;}return out;},
  async terrainCache(enabled){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,496,new Float32Array([enabled?0:1]));weatherDirty=true;compute(0);await runtime.idle();});},
- async terrainAt(points,rays=false){return exclusive(async()=>{await ensureKernels(["terrain_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('terrain_probe',{points:input,camera,output:out},{count:points.length,rays:rays?1:0}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.terrain_probe.clear();}});},
+ async terrainAt(points,rays=false){return exclusive(async()=>{await ensureKernels(["terrain_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('terrain_probe',{points:input,camera,output:out},{count:points.length,rays:rays===true?1:Number(rays)||0}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.terrain_probe.clear();}});},
  async waveModes(){return exclusive(async()=>{const m=await runtime.read(motion);return [1,129,16385,16513].map(i=>{const j=i%16384,x=j%128,z=Math.floor(j/128),k=2*Math.PI*Math.hypot(x,z)/(i<16384?6:96);return {i,k,omega:m[i],phase:m[i]*time+m[81920+i]};});});},
  async geologyState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,64,336);return {depth:c[0],elevation:c[1],crust:c[2],enabled:!!c[3],offset:c[4],mapWidth:c[5],seed:c[6],plateCount:c[7],boundary:c[10],plate:c[11],finite:c.every(Number.isFinite),builds:diagnostics.geologyBuilds};});},
  async geologyAt(points){return exclusive(async()=>{await ensureKernels(["geology_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*48);try{runtime.batch().dispatch(bind('geology_probe',{points:input,plates,camera,output:out},{count:points.length,seedValue:geologySeed}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.geology_probe.clear();}});},
@@ -304,6 +318,11 @@ window.waterLab={
    for(const state of states){const v=await runtime.read(state);let max=0,rms=0;for(let i=0;i<v.length;i+=4){max=Math.max(max,Math.abs(v[i]));rms+=v[i]*v[i];}results.push({finite:Array.from(v).every(Number.isFinite),max,rms:Math.sqrt(rms/16384)});}
    return {flat:results[0],shallow:results[1],deep:results[2],paused:results[3]};
   }finally{runtime.destroyBuffer(zero);for(const state of states)runtime.destroyBuffer(state);kernels.sand_transport.clear();}
+ });},
+ async patternSamples(points){return exclusive(async()=>{await ensureKernels(['appearance_probe']);
+  const input=runtime.createBuffer(new Float32Array(points.flat())),output=runtime.createBuffer(points.length*16);
+  try{runtime.batch().dispatch(bind('appearance_probe',{coefficients:coefficients[1],camera,points:input,output},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(output));}
+  finally{runtime.destroyBuffer(input);runtime.destroyBuffer(output);kernels.appearance_probe.clear();}
  });},
  async bedTest(){return exclusive(async()=>{await ensureKernels(["bed_quality_probe"]);
   const count=4096,out=runtime.createBuffer(count*3*16);
@@ -347,13 +366,13 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_cache','terrain_cache_mip','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','ship_probe'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','appearance_probe','celestial_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','weather_cloud_filter','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_camera_frame','terrain_cache','terrain_cache_mip','terrain_near_cache','terrain_near_coefficients','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','ship_probe','ship_effect_probe'];
  kernelArtifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
  for(const name of names)kernels[name]={loaded:false,clear(){}};
- const optional=new Set(['ship_probe','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
+ const optional=new Set(['ship_probe','ship_effect_probe','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','appearance_probe','celestial_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
  $('loadText').textContent=shipMode?'Preparing the spacecraft and planet…':'Preparing the globe and water…';
  await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()]);
- motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((terrainOffset+Math.ceil(terrainWidth*terrainWidth*4/3)+32)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?96:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
+ motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((nearTerrainOffset+8+nearTerrainWidth*nearTerrainWidth*2)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?176:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
  if(shipMode){shipMesh=runtime.createBuffer(71680*6*16);shipBounds=runtime.createBuffer((255+128*85+1024)*2*16);shipData=runtime.createBuffer(64*16);const b=runtime.batch();b.dispatch(bind('ship_mesh',{mesh:shipMesh,bounds:shipBounds}),[1120,1,1]);for(let level=0;level<=12;level++){const count=level===0?8960:level<5?128*(level===1?64:level===2?16:level===3?4:1):128>>(level-5);b.dispatch(bind('ship_bounds',{mesh:shipMesh,bounds:shipBounds},{level}),[Math.ceil(count/64),1,1]);}b.submit();diagnostics.shipTriangles=71680;}
  requestAnimationFrame(frame);
 }catch(e){fail(e);}
