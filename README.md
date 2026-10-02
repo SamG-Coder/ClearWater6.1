@@ -30,9 +30,13 @@ The original ship is generated entirely in `src/ship.cu`, with 126 separate comp
 - **Space** in the toolbar moves to orbital altitude above the current location; **Ocean** returns to a surface preset.
 - Phones use the movement joystick, screen-drag steering and altitude buttons. Portrait view automatically increases chase distance to keep both wings in frame.
 
+Steering uses damped angular response, velocity inertia, turn-driven banking and a short chase-camera lag. Releasing thrust coasts; braking settles the craft quickly. Boost smoothly increases exhaust output and camera distance.
+
+Near the ocean, both engine pods apply altitude- and thrust-dependent pressure to the local FFT cascade. The surface depresses and sends ripples outward; existing displacement, normals and refraction respond. The pressure domain follows the craft by shifting the Fourier phase, preserving the wake instead of restarting it. A spatial taper suppresses neighboring periodic copies. Forces stop above the water-interaction range and over land; remaining waves decay. This is an artistic vectored-engine downwash approximation, not a fluid exhaust solver.
+
 This stage is a flight and spacecraft-rendering prototype. It has terrain clearance, but no landing sequence, walking character, combat, inventory or survival loop. Ship reflections/shadows are not yet integrated into the ocean surface. Self-shadowing uses mesh intersections; glass and exhaust lighting are approximations. PC keeps four spatial samples; the mobile profile uses the same mesh with one sample and the existing adaptive framebuffer.
 
-`npm run test:ship` checks exact mirrored geometry, both upward stabilizers, BVH intersections against an independent brute-force triangle oracle, actual flight/bank/orbit/wheel controls, mouse lock, touch joystick/steering, surface/space solar-time continuity and actual 2560×1440 / 3840×2160 output. It saves screenshots and GPU timing results under `captures/`. Phone viewport emulation does not measure a physical phone GPU.
+`npm run test:ship` checks exact mirrored geometry, both upward stabilizers, BVH intersections against an independent brute-force triangle oracle, actual flight/bank/orbit/wheel controls, mouse lock, touch joystick/steering, surface/space solar-time continuity and actual 2560×1440 / 3840×2160 output. It saves screenshots and GPU timing results under `captures/`. `npm run test:flight` checks coast/brake/steering response, 30 versus 120 Hz consistency, near-water engine pressure, wake locality and decay after takeoff. Phone viewport emulation does not measure a physical phone GPU.
 
 ## Explore
 

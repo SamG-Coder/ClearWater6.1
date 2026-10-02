@@ -6,7 +6,7 @@ const browser=await chromium.launch({channel:'msedge',headless:true,args:['--ena
 try{
  const page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];
  page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
- await page.goto('http://127.0.0.1:5191/?geology=study');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
+ await page.goto('http://127.0.0.1:5191/?mode=explorer&geology=study');await page.waitForFunction(()=>waterDiagnostics.ready||waterDiagnostics.errors.length,null,{timeout:120000});
  assert.deepEqual(await page.evaluate(()=>waterDiagnostics.errors),[]);
  await page.locator('#toggle').click();await page.evaluate(()=>waterLab.lookDown());await page.evaluate(()=>waterLab.resume());
  await page.mouse.move(800,500);await page.mouse.move(1150,680,{steps:20});

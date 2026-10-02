@@ -141,7 +141,7 @@ function resize(){
  context.configure({device:runtime.device,format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT,alphaMode:'opaque'});
  diagnostics.width=w;diagnostics.height=h;kernels.ship_render.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();
 }
-function qualityKernels(){return [...(mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render']),...(shipMode?['ship_step','ship_render','ship_mesh','ship_bounds']:[])];}
+function qualityKernels(){return [...(mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render']),...(shipMode?['ship_step','ship_wash_pick','ship_wash_modes','ship_render','ship_mesh','ship_bounds']:[])];}
 async function ensureKernels(names){
  const missing=names.filter(name=>!kernels[name]?.loaded);if(!missing.length)return;
  await Promise.all(missing.map(name=>{
@@ -171,7 +171,7 @@ function compute(dt,timestampWrites){
 
  const depth=Number($('depth').value),wind=Number($('wind').value),energy=Number($('energy').value),exposure=Number($('exposure').value),view=Number($('view').value),rays=mobileProfile()?256:(pcQuality()?1024:512),dispersion=mobileProfile()?0:1,lightSize=mapSize();
  const samples=mobileProfile()?1:(pcSampleOverride||($('quality').value==='768'?1:4));diagnostics.pixelSamples=samples;
- if(held&&forceMoved)disturbanceActive=true;
+ if(shipMode||(held&&forceMoved))disturbanceActive=true;
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
  if(visitRain){b.dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude:0,longitude:0,altitude:5,findRain:1,mapSize:mapResolution}),[1,1,1]);visitRain=false;weatherDirty=true;}
@@ -192,9 +192,11 @@ function compute(dt,timestampWrites){
   b.dispatch(bind('weather_cloud_view',{camera,hits:monoLight},{cloudWidth,cloudHeight,aspect:width/height}),[cloudWidth/8,cloudHeight/8,1]);diagnostics.cloudWidth=cloudWidth;diagnostics.cloudHeight=cloudHeight;weatherSkyAt=time;diagnostics.weatherSkyUpdates=(diagnostics.weatherSkyUpdates||0)+1;
  }
  weatherDirty=false;weatherRefresh=0;lastWeatherMode=weatherEnabled;weatherSize=mapResolution;diagnostics.weatherClock=weatherClock;diagnostics.weatherEnabled=weatherEnabled===1;
- b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
+ if(shipMode)b.dispatch(bind('ship_wash_pick',{camera,ship:shipData,brush}),[1,1,1]);
+ else b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
  if(geoEnabled||depth!==lastDepth){b.dispatch(bind('prepare_modes',{motion,camera},{depth,time}),[16,16,3]);lastDepth=depth;diagnostics.dispersionSeeds=(diagnostics.dispersionSeeds||0)+1;}
- if(disturbanceActive)b.dispatch(bind('force_modes',{disturbance,brush,motion},{dt:playing?dt:0,clear:0}),[16,16,1]);
+ if(shipMode)b.dispatch(bind('ship_wash_modes',{disturbance,brush,motion,ship:shipData},{dt:playing?dt:0}),[16,16,1]);
+ else if(disturbanceActive)b.dispatch(bind('force_modes',{disturbance,brush,motion},{dt:playing?dt:0,clear:0}),[16,16,1]);
  if(wind!==lastWind){b.dispatch(bind('seed_modes',{seed,twiddles},{wind}),[16,16,3]);lastWind=wind;diagnostics.spectrumSeeds=(diagnostics.spectrumSeeds||0)+1;}
  b.dispatch(bind('spectrum',{output:fft[0],seed,disturbance,motion,camera,seaMemory},{time,energy}),[16,16,cascades]);
  for(let axis=0;axis<2;axis++)b.dispatch(bind('fft_local',{input:fft[axis],output:fft[1-axis],twiddles},{axis}),[128,1,cascades]);
@@ -232,9 +234,18 @@ async function frame(now){
 async function exclusive(fn){busy=true;try{await runtime.idle();await ensureKernels(qualityKernels());return await fn();}finally{busy=false;}}
 window.waterLab={
  async shipCost(samples=30){let full,water;try{profileSkip=0;full=await waterLab.benchmark(samples);profileSkip=8;water=await waterLab.benchmark(samples);}finally{profileSkip=0;}return {full,water,scope:'Sequential full-scene measurements with and without the ship render pass; not an isolated per-pass timing'};},
- async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[7],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:126};});},
+ async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[39],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:126};});},
  async shipView(yaw=.34,elevation=.3,distance=22){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([yaw,elevation,distance,1]));shipInspect=true;weatherDirty=true;compute(0);await runtime.idle();});},
  async shipAltitude(metres){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,4,new Float32Array([metres]));weatherDirty=true;compute(0);await runtime.idle();});},
+ async shipWashState(){return exclusive(async()=>{const data=await runtime.read(brush);return {pointer:Array.from(data.slice(0,4)),domain:Array.from(data.slice(8,12)),shift:Array.from(data.slice(12,16)),engines:[Array.from(data.slice(16,20)),Array.from(data.slice(20,24))]};});},
+ // Deterministic diagnostic stepping uses the same input/dispatch path as play.
+ async shipAdvance(frames=60,dt=1/60,input={}){return exclusive(async()=>{
+  playing=true;shipInspect=false;keys.clear();sticks.move.x=input.turn||0;sticks.move.y=-(input.forward||0);
+  if(input.rise)keys.add(input.rise>0?'KeyE':'KeyQ');if(input.boost)keys.add('ShiftLeft');
+  try{for(let i=0;i<Math.min(600,frames);i++){lookX=(input.yawRate||0)*dt;lookY=(input.pitchRate||0)*dt;time+=dt;compute(dt);if(i%16===15)await runtime.idle();}await runtime.idle();}
+  finally{playing=false;keys.clear();sticks.move.x=sticks.move.y=0;lookX=lookY=0;}
+  const state=await runtime.read(shipData);diagnostics.shipAltitude=state[1];diagnostics.flightSpeed=state[39];updateMetrics();
+ });},
  async shipRayTest(){return exclusive(async()=>{
   await ensureKernels(['ship_probe']);const mesh=await runtime.read(shipMesh),rays=[];
   for(let i=0;i<36;i++){const a=i*2.399963,origin=[Math.sin(a)*21,4+(i%3)*4,Math.cos(a)*21],target=[(i%5-2)*2,(i%4-1)*1.2,(i%7-3)*1.5],delta=target.map((v,j)=>v-origin[j]),length=Math.hypot(...delta);rays.push({origin,ray:delta.map(v=>v/length)});}
@@ -336,13 +347,13 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_cache','terrain_cache_mip','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_mesh','ship_bounds','ship_render','ship_probe'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_cache','terrain_cache_mip','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','ship_probe'];
  kernelArtifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
  for(const name of names)kernels[name]={loaded:false,clear(){}};
- const optional=new Set(['ship_probe','ship_step','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
+ const optional=new Set(['ship_probe','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
  $('loadText').textContent=shipMode?'Preparing the spacecraft and planet…':'Preparing the globe and water…';
  await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()]);
- motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((terrainOffset+Math.ceil(terrainWidth*terrainWidth*4/3)+32)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
+ motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((terrainOffset+Math.ceil(terrainWidth*terrainWidth*4/3)+32)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?96:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
  if(shipMode){shipMesh=runtime.createBuffer(71680*6*16);shipBounds=runtime.createBuffer((255+128*85+1024)*2*16);shipData=runtime.createBuffer(64*16);const b=runtime.batch();b.dispatch(bind('ship_mesh',{mesh:shipMesh,bounds:shipBounds}),[1120,1,1]);for(let level=0;level<=12;level++){const count=level===0?8960:level<5?128*(level===1?64:level===2?16:level===3?4:1):128>>(level-5);b.dispatch(bind('ship_bounds',{mesh:shipMesh,bounds:shipBounds},{level}),[Math.ceil(count/64),1,1]);}b.submit();diagnostics.shipTriangles=71680;}
  requestAnimationFrame(frame);
 }catch(e){fail(e);}

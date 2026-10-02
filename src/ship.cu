@@ -125,38 +125,107 @@ __global__ void ship_bounds(const float4 *mesh,float4 *bounds,int level){
 }
 __device__ float3 ship_axis(const float4 *ship,float3 p){return plus(scale(ship_xyz(ship[4]),p.x),plus(scale(ship_xyz(ship[5]),p.y),scale(ship_xyz(ship[6]),p.z)));}
 __device__ float3 ship_inverse(const float4 *ship,float3 p){return vec(dotv(p,ship_xyz(ship[4])),dotv(p,ship_xyz(ship[5])),dotv(p,ship_xyz(ship[6])));}
+__device__ float ship_angle(float a){return a-floorf((a+3.14159265f)/6.2831853f)*6.2831853f;}
+// Exact critically damped response; the same feel at 30, 60 and 120 Hz.
+__device__ float2 ship_spring(float position,float velocity,float target,float frequency,float dt){
+ float error=position-target,j=velocity+frequency*error,decay=expf(-frequency*dt);
+ return make_float2(target+(error+j*dt)*decay,(velocity-frequency*j*dt)*decay);
+}
 __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,float deltaTime,float forward,float turn,float rise,float lookX,float lookY,float speed,int boost,int action,int inspect,float depth,float aspect){
  float dt=fminf(.1f,fmaxf(0,deltaTime));
  if(ship[0].w==0||action==1){
   if(camera[8].z==0){float navLength=navigationState[0].x*navigationState[0].x+navigationState[1].x*navigationState[1].x+navigationState[2].x*navigationState[2].x;camera_advance(camera,navigationState,0,0,0,0,0,0,1,0,navLength>.5f?0:1,depth);}
-  ship[0]=make_float4(camera[0].x,22,camera[0].z,1);ship[1]=make_float4(0,0,0,0);ship[2]=make_float4(.34f,.30f,22,0);ship[3]=make_float4(0,0,0,speed);
+  ship[0]=make_float4(camera[0].x,22,camera[0].z,1);ship[1]=make_float4(0,0,0,0);ship[2]=make_float4(.34f,.30f,22,0);ship[3]=make_float4(0,.16f,0,speed);
+  ship[8]=make_float4(0,0,0,0);ship[9]=make_float4(0,0,0,0);ship[10]=make_float4(0,0,22,0);
  }
- if(action==3){ship[0].y=earth_radius()*.70f;ship[1].y=-.40f;ship[2].y=.72f;ship[2].x=.32f;}
+ if(action==3){ship[0].y=earth_radius()*.70f;ship[1].y=-.40f;ship[2].y=.72f;ship[2].x=.32f;ship[8]=make_float4(ship[1].x,-.40f,0,0);ship[9]=make_float4(0,0,0,0);ship[10].x=ship[1].x;ship[10].y=-.40f;}
  float4 pose=ship[1];ship[2].w=(float)inspect;
- if(inspect!=0){ship[2].x+=lookX;ship[2].y=fminf(1.30f,fmaxf(-.15f,ship[2].y-lookY));}
- else{pose.x+=lookX+turn*dt*.85f;pose.y=fminf(1.45f,fmaxf(-1.45f,pose.y+lookY));if(forward>0||fabsf(turn)>.01f||fabsf(lookX)>.001f)ship[2].x*=expf(-dt*3);ship[2].y=mixf(ship[2].y,.24f,1-expf(-dt*3));}
- pose.x-=floorf((pose.x+3.14159265f)/6.2831853f)*6.2831853f;
- float targetBank=fminf(.6f,fmaxf(-.6f,-turn*.48f-lookX/fmaxf(.008f,dt)*.12f));pose.z=mixf(pose.z,targetBank,1-expf(-dt*4));
+ if(inspect!=0){ship[2].x+=lookX;ship[2].y=fminf(1.30f,fmaxf(-.15f,ship[2].y-lookY));ship[8]=make_float4(pose.x,pose.y,0,0);}
+ else{
+  ship[8].x=ship_angle(ship[8].x+lookX+turn*dt*1.12f);ship[8].y=fminf(1.45f,fmaxf(-1.45f,ship[8].y+lookY));
+  // Paused inspection/diagnostic edits should still respond to mouse input.
+  if(dt==0&&(lookX!=0||lookY!=0)){pose.x=ship[8].x;pose.y=ship[8].y;ship[8].z=0;ship[8].w=0;}
+  if(forward>0||fabsf(turn)>.01f||fabsf(lookX)>.001f)ship[2].x*=expf(-dt*4);
+  ship[2].y=mixf(ship[2].y,.24f,1-expf(-dt*4));
+ }
+ if(inspect==0){
+  float2 yaw=ship_spring(pose.x,ship[8].z,pose.x+ship_angle(ship[8].x-pose.x),14,dt),pitch=ship_spring(pose.y,ship[8].w,ship[8].y,14,dt);
+  pose.x=ship_angle(yaw.x);pose.y=pitch.x;ship[8].z=yaw.y;ship[8].w=pitch.y;
+ }
+ float targetBank=inspect==0?fminf(.62f,fmaxf(-.62f,-ship[8].z*.48f)):0;pose.z=mixf(pose.z,targetBank,1-expf(-dt*7));
  float maxSpeed=fminf(30000000,speed*fmaxf(1,ship[0].y*.006f)*(boost!=0?6:1)),target=fmaxf(0,forward)*maxSpeed;
- pose.w=mixf(pose.w,target,1-expf(-dt*(forward<0?7:2.4f)));if(pose.w<.002f)pose.w=0;
- camera[0]=make_float4(ship[0].x,ship[0].y,ship[0].z,0);camera[1]=make_float4(pose.x,pose.y,0,0);
- float actual=fmaxf(pose.w,fabsf(rise)*maxSpeed*.35f),factor=fmaxf(1,camera[0].y*.06f);
- camera_advance(camera,navigationState,dt,actual>0?pose.w/actual:0,0,actual>0?rise*maxSpeed*.35f/actual:0,0,0,actual/factor,0,0,depth);
+ pose.w=mixf(pose.w,target,1-expf(-dt*(forward<0?7:forward>0?2.8f:.48f)));if(pose.w<.002f)pose.w=0;
+ float3 nose=vec(sinf(pose.x)*cosf(pose.y),sinf(pose.y),-cosf(pose.x)*cosf(pose.y));
+ float3 previous=ship_xyz(ship[9]),desired=plus(scale(nose,pose.w),vec(0,rise*maxSpeed*.35f,0));
+ float3 velocity=blend(previous,desired,1-expf(-dt*(forward<0?10:6))),travel=scale(plus(previous,velocity),.5f);
+ float actual=sqrtf(dotv(travel,travel)),factor=fmaxf(1,ship[0].y*.06f);
+ camera[0]=make_float4(ship[0].x,ship[0].y,ship[0].z,0);camera[1]=make_float4(0,0,0,0);
+ camera_advance(camera,navigationState,dt,actual>0?-travel.z/actual:0,actual>0?travel.x/actual:0,actual>0?travel.y/actual:0,0,0,actual/factor,0,0,depth);
  float floorHeight=camera[21].w!=0?terrain_height(camera,ship_xyz(camera[6])):0;camera[0].y=fmaxf(camera[0].y,fmaxf(6,floorHeight+6));
- ship[0]=make_float4(camera[0].x,camera[0].y,camera[0].z,1);ship[1]=pose;ship[3]=make_float4(ship[3].x+dt,mixf(ship[3].y,forward>0?(boost!=0?1:.55f):.12f,1-expf(-dt*4)),camera[0].y-floorHeight,speed);
+ if(camera[0].y<=fmaxf(6,floorHeight+6)+.001f)velocity.y=fmaxf(0,velocity.y);
+ ship[9]=make_float4(velocity.x,velocity.y,velocity.z,sqrtf(dotv(velocity,velocity)));
+ ship[0]=make_float4(camera[0].x,camera[0].y,camera[0].z,1);ship[1]=pose;ship[3]=make_float4(ship[3].x+dt,mixf(ship[3].y,forward>0?(boost!=0?1:.62f):fabsf(rise)>.01f?.38f:.16f,1-expf(-dt*5)),camera[0].y-floorHeight,speed);
  float3 angles=vec(pose.y,-pose.x,pose.z),right=ship_rotate(vec(1,0,0),angles),up=ship_rotate(vec(0,1,0),angles),back=ship_rotate(vec(0,0,1),angles);
  // Positive mouse yaw points the nose to the right in the globe's tangent frame.
  right=ship_rotate(vec(1,0,0),vec(0,-pose.x,0));back=vec(-sinf(pose.x)*cosf(pose.y),-sinf(pose.y),cosf(pose.x)*cosf(pose.y));up=unit(crossv(back,right));
  float3 bankRight=plus(scale(right,cosf(pose.z)),scale(up,sinf(pose.z))),bankUp=minus(scale(up,cosf(pose.z)),scale(right,sinf(pose.z)));
  ship[4]=make_float4(bankRight.x,bankRight.y,bankRight.z,0);ship[5]=make_float4(bankUp.x,bankUp.y,bankUp.z,0);ship[6]=make_float4(back.x,back.y,back.z,0);
- float orbit=ship[2].x,elevation=ship[2].y,distance=ship[2].z*fmaxf(1,.88f/aspect);float3 offset=plus(scale(right,sinf(orbit)*cosf(elevation)*distance),plus(scale(up,sinf(elevation)*distance),scale(back,cosf(orbit)*cosf(elevation)*distance)));
+ // Chase the heading with a short, bounded lag and keep most of the horizon level.
+ ship[10].x=ship_angle(ship[10].x+ship_angle(pose.x-ship[10].x)*(1-expf(-dt*8)));ship[10].y=mixf(ship[10].y,pose.y,1-expf(-dt*8));
+ float cameraYaw=inspect!=0?pose.x:pose.x+fminf(.24f,fmaxf(-.24f,ship_angle(ship[10].x-pose.x))),cameraPitch=inspect!=0?pose.y:mixf(pose.y,ship[10].y,.65f);
+ float3 cameraRight=vec(cosf(cameraYaw),0,sinf(cameraYaw)),cameraBack=vec(-sinf(cameraYaw)*cosf(cameraPitch),-sinf(cameraPitch),cosf(cameraYaw)*cosf(cameraPitch)),cameraUp=unit(crossv(cameraBack,cameraRight));
+ float extra=inspect!=0?0:.08f*clamp01(ship[9].w/fmaxf(1,speed))+.07f*eased(.62f,1,ship[3].y);
+ float wantedDistance=ship[2].z*(1+extra);ship[10].z=dt>0?mixf(ship[10].z,wantedDistance,1-expf(-dt*5)):wantedDistance;
+ float orbit=ship[2].x,elevation=ship[2].y,distance=ship[10].z*fmaxf(1,.88f/aspect);float3 offset=plus(scale(cameraRight,sinf(orbit)*cosf(elevation)*distance),plus(scale(cameraUp,sinf(elevation)*distance),scale(cameraBack,cosf(orbit)*cosf(elevation)*distance)));
  // Keep the model-to-eye transform in small local metres. Subtracting two
  // float32 orbital altitudes would quantize the canopy and tracking camera.
  offset.y=fmaxf(offset.y,floorHeight+2-ship[0].y);
- float3 eye=plus(ship_xyz(ship[0]),offset),f=unit(minus(scale(up,.50f),offset)),r=unit(crossv(f,up)),u=crossv(r,f);
- camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=pose.w;
+ float3 viewUp=unit(plus(cameraUp,scale(cameraRight,sinf(pose.z)*.12f))),eye=plus(ship_xyz(ship[0]),offset),f=unit(minus(vec(0,.50f,0),offset)),r=unit(crossv(f,viewUp)),u=crossv(r,f);
+ camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[1]=make_float4(pose.x,pose.y,0,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=ship[9].w;
  float3 localEye=ship_inverse(ship,offset);ship[7]=make_float4(localEye.x,localEye.y,localEye.z,0);
- camera[19].x=ship[0].y;camera[19].y=pose.w;
+ camera[19].x=ship[0].y;camera[19].y=ship[9].w;
+}
+// Two vectored lift jets create pressure at their actual sea-plane footprints.
+// brush[3] holds the moving-domain shift, clear flag and combined strength;
+// brush[4..5] hold world X/Z, Gaussian radius and strength for each engine.
+__global__ void ship_wash_pick(const float4 *camera,const float4 *ship,float4 *brush){
+ float4 old=brush[2];brush[0]=make_float4(0,0,0,0);brush[1]=make_float4(0,0,0,0);brush[3]=make_float4(0,0,0,0);
+ float3 jet=unit(minus(scale(ship_xyz(ship[6]),.28f),scale(ship_xyz(ship[5]),.96f)));
+ for(int i=0;i<2;i++){
+  float3 engine=plus(ship_xyz(ship[0]),ship_axis(ship,vec(i==0?-4.65f:4.65f,-.5f,2.35f)));
+  float height=engine.y,hit=height/fmaxf(.2f,-jet.y),x=engine.x+jet.x*hit,z=engine.z+jet.z*hit;
+  float nearWater=1-eased(5,28,height),strength=nearWater*nearWater*(.42f+.58f*ship[3].y)*eased(.2f,.65f,-jet.y)*(1-eased(100,300,ship[9].w));
+  if(height<0||height>=28||jet.y>=-.2f)strength=0;
+  if(strength>0&&camera[21].w!=0){float3 normal=to_world(camera,unit(vec(x-ship[0].x,earth_radius(),z-ship[0].z)));if(terrain_height(camera,normal)>-.12f)strength=0;}
+  brush[4+i]=make_float4(x,z,.65f+fminf(28,fmaxf(0,height))*.075f,strength);
+ }
+ float strength=brush[4].w+brush[5].w;
+ if(strength>.0001f){
+  float x=(brush[4].x+brush[5].x)*.5f,z=(brush[4].y+brush[5].y)*.5f,dx=x-old.x,dz=z-old.y;
+  int clear=old.w==0||fabsf(dx)>12||fabsf(dz)>12?1:0;
+  brush[2]=make_float4(x,z,0,1);brush[3]=make_float4(clear!=0?0:dx,clear!=0?0:dz,(float)clear,strength);
+ }else brush[2]=make_float4(old.x,old.y,0,old.w);
+}
+// Forced Fourier oscillators: height and velocity persist after leaving the
+// footprint. Rephase the history when the domain moves, rather than restarting
+// a periodic stamp. The existing C2 spatial taper prevents tiled copies.
+__global__ void ship_wash_modes(float4 *disturbance,const float4 *brush,const float *motion,const float4 *ship,float dt){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,z=blockIdx.y*blockDim.y+threadIdx.y;if(x>=128||z>=128)return;
+ int idx=z*128+x;float4 shift=brush[3],state=shift.z!=0?make_float4(0,0,0,0):disturbance[idx];
+ if(x==64||z==64||(x==0&&z==0)){disturbance[idx]=make_float4(0,0,0,0);return;}
+ if(shift.w==0&&state.x==0&&state.y==0&&state.z==0&&state.w==0)return;
+ int fx=x<64?x:x-128,fz=z<64?z:z-128;float kx=6.2831853f*(float)fx/24,kz=6.2831853f*(float)fz/24,kk=kx*kx+kz*kz;
+ float phase=kx*shift.x+kz*shift.y,rc=cosf(phase),rs=sinf(phase);
+ state=make_float4(state.x*rc-state.y*rs,state.x*rs+state.y*rc,state.z*rc-state.w*rs,state.z*rs+state.w*rc);
+ float targetRe=0,targetIm=0;
+ if(dt>0)for(int i=0;i<2;i++){
+  float4 engine=brush[4+i];float radius2=engine.z*engine.z;
+  float pulse=.86f+.10f*sinf(ship[3].x*8+(float)i*1.7f)+.04f*sinf(ship[3].x*13-(float)i);
+  float amplitude=-.62f*engine.w*pulse*6.2831853f*radius2/576*expf(-kk*radius2*.5f);
+  float p=kx*(engine.x-brush[2].x)+kz*(engine.y-brush[2].y);targetRe+=amplitude*cosf(p);targetIm-=amplitude*sinf(p);
+ }
+ float omega=motion[32768+idx],co=cosf(omega*dt),si=sinf(omega*dt),decay=expf(-(.55f+motion[65536+idx])*dt-sqrtf(shift.x*shift.x+shift.y*shift.y)/8);
+ disturbance[idx]=make_float4((state.x*co+state.z/omega*si+targetRe*(1-co))*decay,(state.y*co+state.w/omega*si+targetIm*(1-co))*decay,(state.z*co-state.x*omega*si+targetRe*omega*si)*decay,(state.w*co-state.y*omega*si+targetIm*omega*si)*decay);
 }
 __device__ int ship_next(int node,int arity){while(node>0&&node%arity==0)node=(node-1)/arity;return node==0?-1:node+1;}
 __device__ int ship_box_hit(const float4 *bounds,int node,float3 origin,float3 inverse,float limit){
