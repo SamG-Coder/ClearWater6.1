@@ -8,9 +8,11 @@ const pcQuality=()=>$('quality').value!=='mobile'&&($('quality').value!=='768'||
 const mapSize=()=>pcQuality()?512:256;
 const mobileProfile=()=>$('quality').value==='mobile';
 const diagnostics=window.waterDiagnostics={ready:false,errors:[],frames:0,readbackBytes:0};
-let visitRain=false;
-let plates,geologySeed=-1,geologySize=0;const geologyOffset=131104+(touchDevice?1048576:4194304);
+let visitRain=false,visitTerrain=false;
+let geometryBytes=0,profileSkip=0;
+let plates,geologySeed=-1,geologySize=0;const geologyOffset=131104+(touchDevice?1048576:4194304),terrainWidth=touchDevice?512:1024,terrainOffset=geologyOffset+Math.ceil((touchDevice?512*256:1024*512)*4/3)+32;
 let seaMemory,weatherClock=14*3600,weatherSeason=172,weatherDirty=true,weatherRefresh=0,weatherMapAt=-Infinity,weatherSkyAt=-Infinity,lastWeatherMode=-1,weatherSize=0,zoomTail=false;
+let kernelArtifacts;const kernelLoads=new Map();
 let navigation,zoomDelta=0,sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let flyFallback=false,lockPending=false;
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
@@ -29,6 +31,7 @@ for(const id of ['depth','energy','wind','exposure'])$(id).oninput=()=>{if(id===
 $('toggle').onclick=()=>{resetSticks();keys.clear();padPointers.clear();document.body.classList.toggle('clean');$('toggle').textContent=touchDevice?(document.body.classList.contains('clean')?'Settings':'Close settings'):(document.body.classList.contains('clean')?'Show controls ↙':'Hide controls ↗');};
 $('pause').onclick=()=>{playing=!playing;$('pause').textContent=playing?'Pause':'Resume';};$('reset').onclick=()=>reset=1;
 $('findRain').onclick=()=>{visitRain=true;reset=0;weatherDirty=true;weatherRefresh=1;};
+$('highlands').onclick=()=>{visitTerrain=true;reset=0;$('depthMode').value='1';weatherDirty=true;};
 $('space').onclick=()=>{reset=3;zoomDelta=0;};
 function flyStatus(message){$('flightStatus').hidden=!message;$('flightStatus').textContent=message;}
 function lockRefused(error){lockPending=false;flyFallback=true;diagnostics.pointerLock='drag';diagnostics.pointerLockReason=String(error?.message||'Browser refused mouse lock');$('fly').textContent='Retry mouse lock';$('fly').setAttribute('aria-pressed','true');flyStatus('Mouse lock was blocked. Drag the water to look; WASD flies, wheel changes speed. Esc exits.');}
@@ -108,7 +111,7 @@ function resize(){
  const mobile=mobileProfile(),aspect=innerWidth/innerHeight;
  const lightChannels=mobile?1:3,lightSize=mapSize(),texels=lightSize*lightSize;
  if(diagnostics.lightChannels!==lightChannels||diagnostics.lightMapSize!==lightSize){
-  runtime.destroyBuffer(light);runtime.destroyBuffer(monoLight);runtime.destroyBuffer(photons);
+  runtime.destroyBuffer(light);runtime.destroyBuffer(monoLight);geometryBytes=0;runtime.destroyBuffer(photons);
   if(coefficients){for(const buffer of coefficients)runtime.destroyBuffer(buffer);coefficients=null;}
   if(pcQuality()){coefficients=[runtime.createBuffer(49152*16),runtime.createBuffer(49152*16)];if(!sandState)sandState=runtime.createBuffer(16384*16);}
   kernels.surface_coefficients.clear();
@@ -119,12 +122,25 @@ function resize(){
 
  const longest=mobile?960*adaptiveScale:Infinity;
  const desiredWidth=mobile?Math.min(innerWidth*devicePixelRatio,longest*Math.min(1,aspect)):Math.min(Number($('quality').value),innerWidth*devicePixelRatio);
- const w=Math.max(64,Math.floor(desiredWidth/64)*64),h=Math.max(8,Math.round(w/aspect/8)*8);
+ const samples=mobile?1:(pcSampleOverride||($('quality').value==='768'?1:4));
+ const pixelLimit=Math.floor((runtime.device.limits.maxStorageBufferBindingSize-(mobile?texels*4:0))/(samples*4+.125));
+ const w=Math.max(64,Math.floor(Math.min(desiredWidth,Math.sqrt((pixelLimit-8192)*aspect))/64)*64),h=Math.max(8,Math.round(w/aspect/8)*8);
+ const needed=(w*h*samples+2*Math.ceil(w/8)*Math.ceil(h/8)+(mobile?texels:0))*4;
+ if(needed!==geometryBytes){runtime.destroyBuffer(monoLight);monoLight=runtime.createBuffer(needed);geometryBytes=needed;diagnostics.geometryStorageBytes=needed-(mobile?texels*4:0);kernels.caustic_resolve.clear();kernels.terrain_intersections.clear();kernels.terrain_tile_heights.clear();kernels.weather_cloud_view.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();}
  diagnostics.mobile=mobile;diagnostics.targetFps=mobile?30:60;diagnostics.adaptiveScale=adaptiveScale;diagnostics.photonRays=mobile?256:(pcQuality()?1024:512);
  if(w===width&&h===height)return;weatherDirty=true;
  if(image)runtime.destroyBuffer(image);width=w;height=h;canvas.width=w;canvas.height=h;image=runtime.createBuffer(w*h*4);
  context.configure({device:runtime.device,format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT,alphaMode:'opaque'});
  diagnostics.width=w;diagnostics.height=h;kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();
+}
+function qualityKernels(){return mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render'];}
+async function ensureKernels(names){
+ const missing=names.filter(name=>!kernels[name]?.loaded);if(!missing.length)return;
+ await Promise.all(missing.map(name=>{
+  if(kernelLoads.has(name))return kernelLoads.get(name);
+  const promise=(async()=>{const kernel=await runtime.kernel(kernelArtifacts.get(name)),cache=new Map();kernels[name]={loaded:true,bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};diagnostics.compiledKernels=(diagnostics.compiledKernels||0)+1;})();
+  kernelLoads.set(name,promise);return promise;
+ }));
 }
 function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars);}
 function compute(dt,timestampWrites){
@@ -133,6 +149,7 @@ function compute(dt,timestampWrites){
  if(geoSeed!==geologySeed||geoWidth!==geologySize){
   b.dispatch(bind('geology_seed',{plates,camera},{seedValue:geoSeed,mapWidth:geoWidth,offset:geologyOffset}),[1,1,1]);
   b.dispatch(bind('geology_map',{plates,camera},{mapWidth:geoWidth,offset:geologyOffset,seedValue:geoSeed}),[geoWidth/8,geoWidth/16,1]);
+  for(let level=1;geoWidth/2**(level+1)>=1;level++)b.dispatch(bind('geology_mip',{camera},{width:geoWidth,level}),[Math.ceil(geoWidth/2**level/8),Math.ceil(geoWidth/2**(level+1)/8),1]);
   geologySeed=geoSeed;geologySize=geoWidth;weatherDirty=true;diagnostics.geologyBuilds=(diagnostics.geologyBuilds||0)+1;
  }
  diagnostics.geologyEnabled=geoEnabled!==0;diagnostics.geologyMapSize=geoWidth;diagnostics.worldSeed=geoSeed;
@@ -150,14 +167,19 @@ function compute(dt,timestampWrites){
  const cascades=disturbanceActive?3:2;diagnostics.activeCascades=cascades;
  const axis=(a,z)=>(keys.has(a)?1:0)-(keys.has(z)?1:0);
  if(visitRain){b.dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude:0,longitude:0,altitude:5,findRain:1,mapSize:mapResolution}),[1,1,1]);visitRain=false;weatherDirty=true;}
+ if(visitTerrain){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:-2500,clock:weatherClock,season:weatherSeason}),[1,1,1]);visitTerrain=false;weatherDirty=true;}
  if(geoEnabled&&(reset===1||reset===2)){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:reset===1?1.4:4500,clock:weatherClock,season:weatherSeason}),[1,1,1]);reset=0;weatherDirty=true;}
  b.dispatch(bind('camera_step',{camera,navigationState:navigation},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),zoom:zoomDelta,reset,depth}),[1,1,1]);zoomDelta=0;reset=0;lookX=lookY=0;
+ b.dispatch(bind('terrain_cache_setup',{camera},{width:terrainWidth,offset:terrainOffset,enabled:geoEnabled}),[1,1,1]);
+ b.dispatch(bind('terrain_cache',{camera},{width:terrainWidth}),[terrainWidth/8,terrainWidth/8,1]);
+ for(let level=1;terrainWidth/2**level>=1;level++)b.dispatch(bind('terrain_cache_mip',{camera},{width:terrainWidth,level}),[Math.ceil(terrainWidth/2**level/8),Math.ceil(terrainWidth/2**level/8),1]);
  b.dispatch(bind('geology_update',{camera},{depth,enabled:geoEnabled}),[1,1,1]);
  b.dispatch(bind('weather_update',{camera},{clock:weatherClock,season:weatherSeason,time,dt:weatherDt,baseWind:wind,enabled:weatherEnabled,mapSize:mapResolution,skyWidth,refresh:weatherRefresh}),[1,1,1]);
+ if(geoEnabled&&!(profileSkip&4))b.dispatch(bind('terrain_tile_heights',{camera,hits:monoLight},{width,height,samples,offset:mobileProfile()?lightSize*lightSize:0}),[Math.ceil(width/64),Math.ceil(height/64),1]);
  if(weatherEnabled&&(weatherDirty||moving||time-weatherSkyAt>=.1||time<weatherSkyAt)){
   b.dispatch(bind('weather_sky',{camera},{skyWidth}),[skyWidth/8,skyWidth/32,1]);
   const cloudScale=Math.min(.5,(touchDevice||mobileProfile()?960:1920)/Math.max(width,height)),cloudWidth=Math.max(8,Math.ceil(width*cloudScale/8)*8),cloudHeight=Math.max(8,Math.ceil(height*cloudScale/8)*8);
-  b.dispatch(bind('weather_cloud_view',{camera},{cloudWidth,cloudHeight,aspect:width/height}),[cloudWidth/8,cloudHeight/8,1]);diagnostics.cloudWidth=cloudWidth;diagnostics.cloudHeight=cloudHeight;weatherSkyAt=time;diagnostics.weatherSkyUpdates=(diagnostics.weatherSkyUpdates||0)+1;
+  b.dispatch(bind('weather_cloud_view',{camera,hits:monoLight},{cloudWidth,cloudHeight,aspect:width/height}),[cloudWidth/8,cloudHeight/8,1]);diagnostics.cloudWidth=cloudWidth;diagnostics.cloudHeight=cloudHeight;weatherSkyAt=time;diagnostics.weatherSkyUpdates=(diagnostics.weatherSkyUpdates||0)+1;
  }
  weatherDirty=false;weatherRefresh=0;lastWeatherMode=weatherEnabled;weatherSize=mapResolution;diagnostics.weatherClock=weatherClock;diagnostics.weatherEnabled=weatherEnabled===1;
  b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
@@ -172,7 +194,8 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('caustic_clear',{photons},{dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
  b.dispatch(bind('caustic_map',{surface:pcQuality()?coefficients[1]:surface,photons,camera},{depth,rays,dispersion,lightSize}),[rays/8,rays/8,1]);
  b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/lightSize)**2,dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
- b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{brush,...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
+ if(geoEnabled&&!(profileSkip&1))b.dispatch(bind('terrain_intersections',{camera,hits:monoLight},{width,height,samples,offset:mobileProfile()?lightSize*lightSize:0,view}),[width/8,height/8,samples]);
+ if(!(profileSkip&2))b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{brush,...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
 function updateMetrics(){if(diagnostics.ready)$('metrics').textContent=`${Math.round(diagnostics.fps)} FPS · ${width} × ${height} · ${formatDistance(diagnostics.altitude||2.6)} altitude · ${formatDistance(diagnostics.flightSpeed||speed)}/s`;}
@@ -183,41 +206,47 @@ async function frame(now){
  try{
   const mobile=mobileProfile(),interval=mobile?1000/30:0;
   if(!busy&&!document.hidden&&(!last||now-last>=interval-.5)){
+   while(qualityKernels().some(name=>!kernels[name]?.loaded)){if(diagnostics.ready){$('loading').hidden=false;$('loadText').textContent='Preparing this quality profile…';}await ensureKernels(qualityKernels());}
    const elapsed=last?(now-last)/1000:1/(mobile?30:60),dt=Math.min(.1,elapsed);last=now;resize();if(playing)time+=dt;
    const start=performance.now();compute(dt);await runtime.idle();
    diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;diagnostics.ready=true;diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
    frameAverage=frameAverage?frameAverage*.94+diagnostics.frameMs*.06:diagnostics.frameMs;
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
-   if(diagnostics.frames%15===0&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];zoomTail=Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[52])} deep · plate ${Math.floor(v[63]+1)} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
+   if(diagnostics.frames%15===0&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];zoomTail=Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[53]>0?v[53]:v[52])} ${v[53]>0?'elevation':'deep'} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
    if(diagnostics.frames===1||diagnostics.frames%15===0)updateMetrics();
   }
   requestAnimationFrame(frame);
  }catch(e){fail(e);}
 }
-async function exclusive(fn){busy=true;try{await runtime.idle();return await fn();}finally{busy=false;}}
+async function exclusive(fn){busy=true;try{await runtime.idle();await ensureKernels(qualityKernels());return await fn();}finally{busy=false;}}
 window.waterLab={
+ async terrainScreenTest(points){return exclusive(async()=>{await ensureKernels(['terrain_screen_probe']);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('terrain_screen_probe',{points:input,camera,hits:monoLight,output:out},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.terrain_screen_probe.clear();}});},
+ async terrainBounds(enabled){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,508,new Float32Array([enabled?0:1]));weatherDirty=true;compute(0);await runtime.idle();});},
+ async profileStages(){const out={};try{for(const [name,mask] of [['full',0],['withoutTerrainIntersections',1],['withoutShading',2],['withoutTerrainTiles',4]]){profileSkip=mask;out[name]=await waterLab.benchmark(20);}}finally{profileSkip=0;}return out;},
+ async terrainCache(enabled){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,496,new Float32Array([enabled?0:1]));weatherDirty=true;compute(0);await runtime.idle();});},
+ async terrainAt(points,rays=false){return exclusive(async()=>{await ensureKernels(["terrain_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('terrain_probe',{points:input,camera,output:out},{count:points.length,rays:rays?1:0}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.terrain_probe.clear();}});},
  async waveModes(){return exclusive(async()=>{const m=await runtime.read(motion);return [1,129,16385,16513].map(i=>{const j=i%16384,x=j%128,z=Math.floor(j/128),k=2*Math.PI*Math.hypot(x,z)/(i<16384?6:96);return {i,k,omega:m[i],phase:m[i]*time+m[81920+i]};});});},
  async geologyState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,64,336);return {depth:c[0],elevation:c[1],crust:c[2],enabled:!!c[3],offset:c[4],mapWidth:c[5],seed:c[6],plateCount:c[7],boundary:c[10],plate:c[11],finite:c.every(Number.isFinite),builds:diagnostics.geologyBuilds};});},
- async geologyAt(points){return exclusive(async()=>{const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*48);try{runtime.batch().dispatch(bind('geology_probe',{points:input,plates,camera,output:out},{count:points.length,seedValue:geologySeed}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.geology_probe.clear();}});},
+ async geologyAt(points){return exclusive(async()=>{await ensureKernels(["geology_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*48);try{runtime.batch().dispatch(bind('geology_probe',{points:input,plates,camera,output:out},{count:points.length,seedValue:geologySeed}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.geology_probe.clear();}});},
  async plateData(){return exclusive(async()=>Array.from(await runtime.read(plates)));},
  async weatherLocation(latitude,longitude,altitude=5){return exclusive(async()=>{runtime.batch().dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude,longitude,altitude,findRain:0,mapSize:weatherSize}),[1,1,1]).submit();weatherDirty=true;weatherRefresh=1;compute(0);await runtime.idle();});},
  async weatherState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,320),memory=await runtime.read(seaMemory);let fast=0,slow=0;for(let i=0;i<16384;i++){fast+=memory[i]/16384;slow+=memory[i+16384]/16384;}return {clock:weatherClock,season:weatherSeason,enabled:!!c[55],wind:Array.from(c.slice(40,43)),cloud:c[43],rain:c[44],sunlight:c[45],temperature:c[46],pressure:c[47],sun:Array.from(c.slice(48,51)),localSun:Array.from(c.slice(36,39)),latitude:c[70],localHour:c[71],energy:[fast,slow],finite:c.every(Number.isFinite)&&memory.every(Number.isFinite),mapUpdates:diagnostics.weatherMapUpdates,skyUpdates:diagnostics.weatherSkyUpdates};});},
- async weatherAt(points){return exclusive(async()=>{const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*64);try{runtime.batch().dispatch(bind('weather_probe',{points:input,output:out,camera},{count:points.length,season:weatherSeason}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.weather_probe.clear();}});},
+ async weatherAt(points){return exclusive(async()=>{await ensureKernels(["weather_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*64);try{runtime.batch().dispatch(bind('weather_probe',{points:input,output:out,camera},{count:points.length,season:weatherSeason}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.weather_probe.clear();}});},
  async weatherSeek(seconds,season=172){return exclusive(async()=>{playing=false;weatherClock=seconds;weatherSeason=season;weatherDirty=true;weatherRefresh=1;compute(0);await runtime.idle();});},
  async weatherAdvance(seconds,steps=120){return exclusive(async()=>{playing=false;for(let i=0;i<steps;i++){weatherClock+=seconds/steps;time+=1/60;weatherDirty=true;compute(0);runtime.batch().dispatch(bind('weather_update',{camera},{clock:weatherClock,season:weatherSeason,time,dt:seconds/steps,baseWind:Number($('wind').value),enabled:Number($('weatherMode').value),mapSize:weatherSize,skyWidth:mobileProfile()?256:512,refresh:0}),[1,1,1]).dispatch(bind('spectrum',{output:fft[0],seed,disturbance,motion,camera,seaMemory},{time,energy:Number($('energy').value)}),[16,16,2]).submit();}weatherDirty=true;compute(0);await runtime.idle();});},
 
- async geometryTest(points){return exclusive(async()=>{const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('planet_probe',{points:input,output:out},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.planet_probe.clear();}});},
+ async geometryTest(points){return exclusive(async()=>{await ensureKernels(["planet_probe"]);const input=runtime.createBuffer(new Float32Array(points.flat())),out=runtime.createBuffer(points.length*16);try{runtime.batch().dispatch(bind('planet_probe',{points:input,output:out},{count:points.length}),[Math.ceil(points.length/64),1,1]).submit();return Array.from(await runtime.read(out));}finally{runtime.destroyBuffer(input);runtime.destroyBuffer(out);kernels.planet_probe.clear();}});},
  async planetState(){return exclusive(async()=>{const c=await runtime.read(camera,Float32Array,320),raw=await runtime.read(navigation);diagnostics.altitude=c[1];diagnostics.flightSpeed=c[33];updateMetrics();return {altitude:c[0*4+1],radius:c[8*4+2],speed:c[8*4+1],normal:Array.from(c.slice(24,27)),east:Array.from(c.slice(20,23)),back:Array.from(c.slice(28,31)),camera:Array.from(c.slice(0,8)),navigation:Array.from({length:8},(_,i)=>raw[i*2]+raw[i*2+1]),finite:c.every(Number.isFinite)};});},
  async setAltitude(meters){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,4,new Float32Array([meters]));weatherDirty=true;compute(0);await runtime.idle();});},
  async flightTest(steps,seconds,forward,side,up,speed){return exclusive(async()=>{for(let i=0;i<steps;i++)runtime.batch().dispatch(bind('camera_step',{camera,navigationState:navigation},{dt:seconds/steps,forward,side,up,lookX:0,lookY:0,speed,zoom:0,reset:0,depth:Number($('depth').value)}),[1,1,1]).submit();weatherDirty=true;compute(0);await runtime.idle();});},
- async setPixelSamples(count){if(count!==0&&count!==1&&count!==4)throw Error('Pixel samples must be 0 (automatic), 1 or 4');return exclusive(async()=>{pcSampleOverride=count;resize();weatherDirty=true;compute(0);await runtime.idle();});},
+ async setPixelSamples(count){if(count!==0&&count!==1&&count!==4)throw Error('Pixel samples must be 0 (automatic), 1 or 4');return exclusive(async()=>{await ensureKernels(["render_pc_single", "render_pc", "surface_coefficients", "sand_transport"]);pcSampleOverride=count;resize();weatherDirty=true;compute(0);await runtime.idle();});},
  async lookAt(yaw,pitch){return exclusive(async()=>{runtime.device.queue.writeBuffer(camera.gpuBuffer,16,new Float32Array([yaw,pitch,0,0]));weatherDirty=true;compute(0);await runtime.idle();});},
  async lookDown(){return exclusive(async()=>{const update=new Float32Array([0,-.95,0,0]);runtime.device.queue.writeBuffer(camera.gpuBuffer,16,update);weatherDirty=true;compute(0);await runtime.idle();});},
  pause(){playing=false;},resume(){playing=true;},
- async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera,Float32Array,320);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const rawLight=await runtime.read(mobileProfile()?monoLight:light),l=mobileProfile()?Float32Array.from({length:65536*4},(_,i)=>i%4===3?1:rawLight[Math.floor(i/4)]):rawLight,d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];let causticMin=Infinity,causticMax=-Infinity;for(let i=0;i<l.length;i+=4){causticMin=Math.min(causticMin,l[i]);causticMax=Math.max(causticMax,l[i]);for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/(l.length/4);}return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin,causticMax,adapter:runtime.describe()};});},
+ async inspect(){return exclusive(async()=>{const a=await runtime.read(surface),c=await runtime.read(camera,Float32Array,320);let max=0,imag=0,sum=0,disturbanceMax=0;for(let i=0;i<a.length;i+=4){max=Math.max(max,Math.abs(a[i]));imag=Math.max(imag,Math.abs(a[i+3]));sum+=a[i]*a[i];if(i>=32768*4)disturbanceMax=Math.max(disturbanceMax,Math.abs(a[i]));}const rawLight=await runtime.read(mobileProfile()?monoLight:light,Float32Array,mapSize()*mapSize()*(mobileProfile()?4:16)),l=mobileProfile()?Float32Array.from({length:65536*4},(_,i)=>i%4===3?1:rawLight[Math.floor(i/4)]):rawLight,d=await runtime.read(disturbance);let forceEnergy=0;for(const v of d)forceEnergy+=v*v;const causticMean=[0,0,0];let causticMin=Infinity,causticMax=-Infinity;for(let i=0;i<l.length;i+=4){causticMin=Math.min(causticMin,l[i]);causticMax=Math.max(causticMax,l[i]);for(let c=0;c<3;c++)causticMean[c]+=l[i+c]/(l.length/4);}return {forceEnergy,disturbanceMax,causticMean,finite:a.every(Number.isFinite)&&l.every(Number.isFinite),heightMax:max,heightRms:Math.sqrt(sum/(a.length/4)),imaginaryResidual:imag,camera:Array.from(c.slice(0,8)),causticMin,causticMax,adapter:runtime.describe()};});},
  async seek(t){return exclusive(async()=>{playing=false;time=t;resize();weatherDirty=true;compute(0);await runtime.idle();});},
  async screenshot(){return exclusive(async()=>{const p=await runtime.read(image,Uint32Array);return {width,height,rgba:Array.from(new Uint8Array(p.buffer))};});},
- async domainTest(){return exclusive(async()=>{
+ async domainTest(){return exclusive(async()=>{await ensureKernels(["domain_probe"]);
   const domain=await runtime.read(brush),cx=domain[8],cz=domain[9],count=532,points=new Float32Array(count*4);
   for(let i=0;i<256;i++){const x=cx+(i%16-7.5)*.75,z=cz+(Math.floor(i/16)-7.5)*.75;points.set([x,z,0,0],i*4);points.set([x+24,z,0,0],(i+256)*4);}
   const centers=[[24,3],[3,24],[cx+7,cz],[cx+12,cz]];for(let j=0;j<4;j++)for(const [k,dx,dz] of [[0,0,0],[1,.001,0],[2,-.001,0],[3,0,.001],[4,0,-.001]])points.set([centers[j][0]+dx,centers[j][1]+dz,0,0],(512+j*5+k)*4);
@@ -228,7 +257,7 @@ window.waterLab={
    return {seamSlopeError,finite:values.every(Number.isFinite),local,ghost,untaperedGhost,regionalDifference,domain:[cx,cz]};
   }finally{runtime.destroyBuffer(input);runtime.destroyBuffer(output);kernels.domain_probe.clear();}
  });},
- async sandTest(){return exclusive(async()=>{
+ async sandTest(){return exclusive(async()=>{await ensureKernels(["sand_transport"]);
   const zero=runtime.createBuffer(49152*16),states=[0,1,2,3].map(()=>runtime.createBuffer(16384*16));
   try{
    for(let group=0;group<4;group++){const batch=runtime.batch();
@@ -238,14 +267,14 @@ window.waterLab={
    return {flat:results[0],shallow:results[1],deep:results[2],paused:results[3]};
   }finally{runtime.destroyBuffer(zero);for(const state of states)runtime.destroyBuffer(state);kernels.sand_transport.clear();}
  });},
- async bedTest(){return exclusive(async()=>{
+ async bedTest(){return exclusive(async()=>{await ensureKernels(["bed_quality_probe"]);
   const count=4096,out=runtime.createBuffer(count*3*16);
   try{runtime.batch().dispatch(bind('bed_quality_probe',{output:out},{count}),[count/64,1,1]).submit();const data=await runtime.read(out);let stonePoints=0,maxStoneHeight=0,sandSlopeError=0,stoneSlopeError=0;
    for(let i=0;i<count;i++){const a=i*12;if(data[a+4]>.0005)stonePoints++;maxStoneHeight=Math.max(maxStoneHeight,data[a+4]);sandSlopeError=Math.max(sandSlopeError,Math.abs(data[a+1]-data[a+8]),Math.abs(data[a+2]-data[a+9]));stoneSlopeError=Math.max(stoneSlopeError,Math.abs(data[a+5]-data[a+10]),Math.abs(data[a+6]-data[a+11]));}
    return {finite:data.every(Number.isFinite),points:count,stonePoints,maxStoneHeight,sandSlopeError,stoneSlopeError,oracle:'Centered finite differences of actual geometric relief; analytic normals evaluated independently'};
   }finally{runtime.destroyBuffer(out);kernels.bed_quality_probe.clear();}
  });},
- async interpolationTest(){return exclusive(async()=>{
+ async interpolationTest(){return exclusive(async()=>{await ensureKernels(["sample_quality_probe", "surface_coefficients"]);
   // Independent analytic Fourier surface; never used for live simulation.
   const modes=[{x:13,z:7,a:.08},{x:5,z:-9,a:.04}],field=new Float32Array(49152*4),points=new Float32Array(64*4);
   const oracle=(x,z)=>{let h=0,dx=0,dz=0;for(const m of modes){const kx=2*Math.PI*m.x/6,kz=2*Math.PI*m.z/6,p=kx*x+kz*z;h+=m.a*Math.cos(p);dx-=m.a*kx*Math.sin(p);dz-=m.a*kz*Math.sin(p);}return [h,dx,dz];};
@@ -258,7 +287,7 @@ window.waterLab={
    return {bilinear:errors[0],cubic:errors[1],finite:values.every(Number.isFinite),points:64,oracle:'Independent analytic Fourier height and derivatives, including periodic boundaries'};
   }finally{runtime.destroyBuffer(input);runtime.destroyBuffer(positions);runtime.destroyBuffer(output);runtime.destroyBuffer(temporary);runtime.destroyBuffer(filtered);kernels.sample_quality_probe.clear();kernels.surface_coefficients.clear();}
  });},
- async fftTest(strategy='shared'){return exclusive(async()=>{
+ async fftTest(strategy='shared'){return exclusive(async()=>{await ensureKernels(["fft_stage"]);
   const data=new Float32Array(49152*2),modes=[{x:3,z:7,c:0,re:.3,im:-.2},{x:51,z:89,c:0,re:.07,im:.11},{x:11,z:125,c:1,re:-.4,im:.15},{x:37,z:11,c:2,re:.03,im:-.02}];
   const reverse=x=>{let r=0;for(let i=0;i<7;i++){r=r*2+(x&1);x>>=1;}return r;};
   for(const m of modes){const idx=(m.c*16384+reverse(m.z)*128+reverse(m.x))*2;data[idx]=m.re;data[idx+1]=m.im;}
@@ -280,11 +309,11 @@ window.waterLab={
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit'];
- const artifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
- for(const name of ['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit']){
-  $('loadText').textContent=`Preparing ${name.replaceAll('_',' ')}…`;const artifact=artifacts.get(name);
-  const kernel=await runtime.kernel(artifact),cache=new Map();kernels[name]={bind(buffers,scalars){const key=Object.values(buffers).map(b=>b.id).join(':');let v=cache.get(key);if(v)v.setScalars(scalars);else{v=kernel.bind(buffers,scalars);cache.set(key,v);}return v;},clear(){cache.clear();}};
- }
- motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((geologyOffset+(touchDevice?512*256:1024*512))*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_cache','terrain_cache_mip','terrain_intersections','geology_mip','terrain_tile_heights'];
+ kernelArtifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Kernel ${name}: HTTP ${response.status}`);return [name,await response.json()];})));
+ for(const name of names)kernels[name]={loaded:false,clear(){}};
+ const optional=new Set(['render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
+ $('loadText').textContent='Preparing the globe and water…';
+ await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()]);
+ motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((terrainOffset+Math.ceil(terrainWidth*terrainWidth*4/3)+32)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();requestAnimationFrame(frame);
 }catch(e){fail(e);}

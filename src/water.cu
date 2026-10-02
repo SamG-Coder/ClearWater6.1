@@ -363,6 +363,7 @@ __global__ void brush_pick(const float4 *surface,const float4 *camera,float4 *br
  float t=globe_hit(p.y,ray);if(t<0||t>2000){brush[1]=make_float4(old.x,old.y,0,0);return;}
  for(int j=0;j<4;j++){float h=wave_height(surface,brush,p.x+ray.x*t,p.z+ray.z*t,t,pressureActive)-(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-p.y)/ray.y,.75f);}
  float x=p.x+ray.x*t,z=p.z+ray.z*t;
+ if(camera[21].w!=0&&terrain_height(camera,to_world(camera,unit(vec(ray.x*t,earth_radius()+p.y+ray.y*t,ray.z*t))))>0){brush[1]=make_float4(old.x,old.y,0,0);return;}
  if(domain.w==0||fabsf(x-domain.x)>6||fabsf(z-domain.y)>6){domain=make_float4(x,z,1,1);brush[2]=domain;}
 
  float dx=old.z>.5f&&moving!=0?x-old.x:0,dz=old.z>.5f&&moving!=0?z-old.y:0;
@@ -684,7 +685,7 @@ __global__ void geology_seed(float4 *plates,float4 *camera,int seedValue,int map
   plates[i*2+1]=make_float4(spin.x,spin.y,spin.z,30+randf(h+29u)*110);
  }
  camera[22]=make_float4((float)offset,(float)mapWidth,(float)seedValue,28);
- camera[23]=make_float4(-1,0,0,0);
+ camera[23]=make_float4(-1,0,0,0);camera[31].y=(float)(offset+mapWidth*mapWidth/2);
 }
 __device__ float4 geology_cell(const float4 *plates,float3 n,int seedValue,int tectonics){
  float best=-2;int owner=0;
@@ -710,7 +711,8 @@ __device__ float4 geology_cell(const float4 *plates,float3 n,int seedValue,int t
  crust/=total;
  float3 shift=vec(randf((unsigned)seedValue+43u)*11,randf((unsigned)seedValue+47u)*11,randf((unsigned)seedValue+53u)*11);
  float broad=globe_noise(plus(scale(n,3.7f),shift)),medium=globe_noise(plus(scale(n,11.3f),shift));
- float continental=clamp01(crust*.57f+broad*.43f+(medium-.5f)*.12f);
+ float coastal=globe_noise(plus(scale(n,37),shift))-.5f;
+ float continental=clamp01(crust*.57f+broad*.43f+(medium-.5f)*.12f+coastal*.065f);
  float relief=globe_noise(plus(scale(n,49),shift))-.5f;
  float ocean=-2600-320*sqrtf(fminf(180,age));
  if(tectonics!=0)ocean+=ridge*650-trench*4200;
@@ -728,6 +730,18 @@ __global__ void geology_map(const float4 *plates,float4 *camera,int mapWidth,int
  float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
  camera[offset+y*mapWidth+x]=geology_cell(plates,n,seedValue,1);
 }
+
+// A static maximum-height pyramid bounds whole ray intervals. It is built
+// once per world seed, independently of camera position or output resolution.
+__global__ void geology_mip(float4 *camera,int width,int level){
+ int w=width>>level,h=(width/2)>>level,x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
+ if(x>=w||y>=h)return;
+ int previous=(int)camera[22].x,offset=previous;
+ for(int j=0;j<level;j++){previous=offset;offset+=(width>>j)*((width/2)>>j);}
+ float peak=-12000;
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++)peak=fmaxf(peak,camera[previous+(y*2+j)*(w*2)+x*2+i].x);
+ camera[offset+y*w+x]=make_float4(peak,0,0,0);
+}
 __device__ float4 geology_sample(const float4 *camera,float3 n){
  int offset=(int)camera[22].x,width=(int)camera[22].y,height=width/2;
  float u=(atan2f(n.x,n.z)/6.2831853f+.5f)*(float)width-.5f;
@@ -739,15 +753,377 @@ __device__ float4 geology_sample(const float4 *camera,float3 n){
   out.x+=q.x*weight;out.y+=q.y*weight;out.z+=q.z*weight;out.w+=q.w*weight;
  }return out;
 }
-// The first bathymetry stage keeps continental crust submerged. The same
-// signed elevation field supplies raised land in the following stage.
+
+// The small cache stores broad geography. World-space detail bands add
+// terrain relief without allocating metre-resolution data around the planet.
+// The detail vanishes at the shoreline, preserving one shared coastline.
+__device__ float3 terrain_rotate(float3 p){return vec(.8f*p.x+.6f*p.z,.36f*p.x+.8f*p.y-.48f*p.z,-.48f*p.x+.6f*p.y+.64f*p.z);}
+__device__ float terrain_direct(const float4 *camera,float3 n){
+ float h=geology_sample(camera,n).x;
+ if(h>0){
+  float3 shift=vec(camera[22].z*.0031f,17,31),p=plus(scale(n,713),shift);
+  float coarse=globe_noise(p)*.6f+globe_noise(terrain_rotate(scale(p,2.17f)))*.4f;
+  float ridge=1-fabsf(coarse*2-1);
+  float mountain=(ridge*ridge-.55f)*920;
+  float middle=(globe_noise(plus(terrain_rotate(scale(n,2311)),shift))-.5f)*190;
+  float fine=(globe_noise(plus(terrain_rotate(scale(n,7517)),shift))-.5f)*68;
+  float crags=(globe_noise(plus(terrain_rotate(scale(n,21373)),shift))-.5f)*20;
+  h+=(mountain*eased(20,600,h)+(middle+fine+crags)*eased(10,250,h));
+ }return h;
+}
+
+// A camera-local spherical cache amortizes terrain evaluation. Its frame is
+// fixed between recentres, so fly-camera rotation never moves the land texture.
+__global__ void terrain_cache_setup(float4 *camera,int width,int offset,int enabled){
+ float3 n=vec(camera[6].x,camera[6].y,camera[6].z),old=vec(camera[27].x,camera[27].y,camera[27].z);
+ float3 delta=minus(n,old);int update=enabled!=0&&camera[0].y<40000&&((int)camera[27].w!=width||camera[30].x!=camera[22].z||dotv(delta,delta)*earth_radius()*earth_radius()>16000000)?1:0;
+ camera[30].y=(float)update;camera[30].z=4;
+ if(update==0)return;
+ camera[27]=make_float4(n.x,n.y,n.z,(float)width);
+ camera[28]=make_float4(camera[5].x,camera[5].y,camera[5].z,(float)offset);
+ camera[29]=make_float4(camera[7].x,camera[7].y,camera[7].z,32768);
+ camera[30].x=camera[22].z;
+}
+__global__ void terrain_cache(float4 *camera,int width){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
+ if(x>=width||y>=width||camera[30].y==0)return;
+ float u=(((float)x+.5f)/(float)width-.5f)*32768/earth_radius(),v=(((float)y+.5f)/(float)width-.5f)*32768/earth_radius();
+ float c=sqrtf(fmaxf(0,1-u*u-v*v));float4 a=camera[27],b=camera[28],d=camera[29];
+ float3 n=vec(a.x*c+b.x*u+d.x*v,a.y*c+b.y*u+d.y*v,a.z*c+b.z*u+d.z*v);
+ float h=terrain_direct(camera,n);camera[(int)b.w+y*width+x]=make_float4(h,0,0,0);
+}
+__global__ void terrain_cache_mip(float4 *camera,int width,int level){
+ int w=width>>level,x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
+ if(x>=w||y>=w||camera[30].y==0)return;
+ int previous=(int)camera[28].w,offset=previous;
+ for(int j=0;j<level;j++){previous=offset;int side=width>>j;offset+=side*side;}
+ float peak=-12000;
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++)peak=fmaxf(peak,camera[previous+(y*2+j)*(w*2)+x*2+i].x);
+ camera[offset+y*w+x]=make_float4(peak,0,0,0);
+}
+__device__ float4 terrain_weights(float a){
+ float a2=a*a,a3=a2*a,b=1-a;
+ return make_float4(b*b*b/6,(4-6*a2+3*a3)/6,(1+3*a+3*a2-3*a3)/6,a3/6);
+}
+
+__device__ float terrain_height(const float4 *camera,float3 n){
+ float fade=1-eased(20000,180000,camera[0].y);
+ if(fade==0)return geology_sample(camera,n).x;
+ float4 centre=camera[27],east=camera[28],back=camera[29];int width=(int)centre.w;
+ float u=dotv(n,vec(east.x,east.y,east.z))*earth_radius()/32768+.5f,v=dotv(n,vec(back.x,back.y,back.z))*earth_radius()/32768+.5f;
+ float h=0;
+ if(width>0&&camera[31].x==0&&u>.01f&&u<.99f&&v>.01f&&v<.99f&&dotv(n,vec(centre.x,centre.y,centre.z))>.99f){
+  float x=u*(float)width-.5f,y=v*(float)width-.5f,a=fract(x),b=fract(y);int ix=(int)floorf(x),iy=(int)floorf(y),offset=(int)east.w;
+  // C2 reconstruction avoids a visible cell lattice in the terrain normal.
+  int taps=(int)camera[30].z;float4 wx=terrain_weights(a),wy=terrain_weights(b);
+  for(int j=0;j<taps;j++){
+   int row=offset+(iy+j-1)*width+ix-1;float w=j==0?wy.x:(j==1?wy.y:(j==2?wy.z:wy.w));
+   h+=(camera[row].x*wx.x+camera[row+1].x*wx.y+camera[row+2].x*wx.z+camera[row+3].x*wx.w)*w;
+  }
+  float edge=fminf(fminf(u,1-u),fminf(v,1-v));if(edge<.06f)h=mixf(terrain_direct(camera,n),h,eased(.01f,.06f,edge));
+ }else h=terrain_direct(camera,n);
+ return fade<1?mixf(geology_sample(camera,n).x,h,fade):h;
+}
+__device__ float4 terrain_cached_gradient(const float4 *camera,float3 n){
+ float4 centre=camera[27],east=camera[28],back=camera[29];int width=(int)centre.w;
+ float u=dotv(n,vec(east.x,east.y,east.z))*earth_radius()/32768+.5f,v=dotv(n,vec(back.x,back.y,back.z))*earth_radius()/32768+.5f;
+ float h=0,gx=0,gz=0;
+ if(width>0&&camera[31].x==0&&u>.06f&&u<.94f&&v>.06f&&v<.94f&&dotv(n,vec(centre.x,centre.y,centre.z))>.99f){
+  float x=u*(float)width-.5f,y=v*(float)width-.5f,a=fract(x),b=fract(y);int ix=(int)floorf(x),iy=(int)floorf(y),offset=(int)east.w;
+  // C2 reconstruction avoids a visible cell lattice in the terrain normal.
+  int taps=(int)camera[30].z;float4 wx=terrain_weights(a),wy=terrain_weights(b);
+  float4 dx=make_float4(-.5f*(1-a)*(1-a),-2*a+1.5f*a*a,.5f+a-1.5f*a*a,.5f*a*a);
+  float4 dz=make_float4(-.5f*(1-b)*(1-b),-2*b+1.5f*b*b,.5f+b-1.5f*b*b,.5f*b*b);
+  for(int j=0;j<taps;j++){
+   int row=offset+(iy+j-1)*width+ix-1;float v0=camera[row].x,v1=camera[row+1].x,v2=camera[row+2].x,v3=camera[row+3].x;
+   float w=j==0?wy.x:(j==1?wy.y:(j==2?wy.z:wy.w)),d=j==0?dz.x:(j==1?dz.y:(j==2?dz.z:dz.w));
+   float value=v0*wx.x+v1*wx.y+v2*wx.z+v3*wx.w;
+   h+=value*w;gx+=(v0*dx.x+v1*dx.y+v2*dx.z+v3*dx.w)*w;gz+=value*d;
+  }
+
+ }else return make_float4(0,0,0,-100000);
+
+ float factor=(float)width/32768;
+ float3 grad=vec(east.x*gx+back.x*gz,east.y*gx+back.y*gz,east.z*gx+back.z*gz);
+ grad=scale(minus(grad,scale(n,dotv(n,grad))),factor);
+ return make_float4(grad.x,grad.y,grad.z,h);
+}
+__device__ float3 terrain_world(const float4 *camera,float3 ray,float t){
+ return to_world(camera,unit(vec(ray.x*t,earth_radius()+camera[0].y+ray.y*t,ray.z*t)));
+}
+__device__ float terrain_clearance(const float4 *camera,float3 ray,float t){
+ float hy=camera[0].y+ray.y*t,x=ray.x*t,z=ray.z*t,R=earth_radius();
+ // Rationalized altitude keeps metre precision beside a 6371 km radius.
+ float altitude=hy+(x*x+z*z)/(sqrtf((R+hy)*(R+hy)+x*x+z*z)+R+hy);
+ return altitude-terrain_height(camera,terrain_world(camera,ray,t));
+}
+__device__ float terrain_ray_altitude(float altitude,float3 ray,float t){
+ float y=altitude+ray.y*t,x=ray.x*t,z=ray.z*t,R=earth_radius();
+ return y+(x*x+z*z)/(sqrtf((R+y)*(R+y)+x*x+z*z)+R+y);
+}
+// Reuse the spline height and derivative in one fetch. A screen-tile hit is
+// only a starting estimate; every subpixel still solves its own surface ray.
+__device__ float terrain_refine(const float4 *camera,float3 ray,float t,float radius){
+ float initial=t,altitude=camera[0].y;float3 worldRay=to_world(camera,ray);
+ for(int j=0;j<5;j++){
+  if(t<=0||fabsf(t-initial)>radius)return -1;
+  float3 n=terrain_world(camera,ray,t);float4 g=terrain_cached_gradient(camera,n);
+  if(altitude>=20000)return -1;
+  float h=g.w> -90000?g.w:terrain_height(camera,n);if(h<=0)return -1;
+  float height=terrain_ray_altitude(altitude,ray,t),error=height-h;
+  // The world normal is float32: below this range-scaled residual, another
+  // refinement mainly changes coordinate rounding rather than the hit.
+  if(fabsf(error)<.04f+t*.000004f)return t;
+  float3 radial=unit(vec(ray.x*t,earth_radius()+altitude+ray.y*t,ray.z*t));
+  float derivative=dotv(radial,ray);
+  if(g.w> -90000)derivative-=dotv(vec(g.x,g.y,g.z),worldRay)*earth_radius()/(earth_radius()+height);
+  else derivative=(terrain_clearance(camera,ray,t+64)-error)/64;
+  if(derivative>=-.02f)return -1;
+  t-=error/derivative;
+ }return -1;
+}
+
+
+__device__ float2 geology_uv(float3 n,int width){
+ return make_float2((atan2f(n.x,n.z)/6.2831853f+.5f)*(float)width-.5f,(.5f-atan2f(n.y,sqrtf(n.x*n.x+n.z*n.z))/3.14159265f)*(float)(width/2)-.5f);
+}
+__device__ float terrain_local_upper(const float4 *camera,float3 a,float3 b){
+ float4 c=camera[27],e=camera[28],d=camera[29];int width=(int)c.w;
+ if(width==0||camera[31].x!=0||camera[0].y>=20000||dotv(a,vec(c.x,c.y,c.z))<.999f||dotv(b,vec(c.x,c.y,c.z))<.999f)return -20000;
+ float au=dotv(a,vec(e.x,e.y,e.z))*earth_radius()/32768+.5f,av=dotv(a,vec(d.x,d.y,d.z))*earth_radius()/32768+.5f;
+ float bu=dotv(b,vec(e.x,e.y,e.z))*earth_radius()/32768+.5f,bv=dotv(b,vec(d.x,d.y,d.z))*earth_radius()/32768+.5f;
+ float lowX=fminf(au,bu),highX=fmaxf(au,bu),lowY=fminf(av,bv),highY=fmaxf(av,bv);
+ if(lowX<.08f||lowY<.08f||highX>.92f||highY>.92f)return -20000;
+ // Three source cells enclose the spline support and the short chart arc.
+ int x0=(int)floorf(lowX*(float)width-.5f)-3,x1=(int)ceilf(highX*(float)width-.5f)+3,y0=(int)floorf(lowY*(float)width-.5f)-3,y1=(int)ceilf(highY*(float)width-.5f)+3;
+ int span=x1-x0>y1-y0?x1-x0:y1-y0,level=0,offset=(int)e.w;
+ while((1<<level)<span){int side=width>>level;offset+=side*side;level++;}
+ int w=width>>level;float peak=-12000;
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){int x=(i==0?x0:x1)>>level,y=(j==0?y0:y1)>>level;peak=fmaxf(peak,camera[offset+y*w+x].x);}
+ return peak+.01f;
+}
+__device__ float geology_height_uv(const float4 *camera,float u,float v){
+ int width=(int)camera[22].y,offset=(int)camera[22].x,x=(int)floorf(u),y=(int)floorf(v);float a=fract(u),b=fract(v);
+ return mixf(mixf(camera[offset+y*width+(x&(width-1))].x,camera[offset+y*width+((x+1)&(width-1))].x,a),mixf(camera[offset+(y+1)*width+(x&(width-1))].x,camera[offset+(y+1)*width+((x+1)&(width-1))].x,a),b);
+}
+__device__ float terrain_upper(const float4 *camera,float3 ray,float start,float end,float padding){
+ int width=(int)camera[22].y;float3 a=terrain_world(camera,ray,start),b=terrain_world(camera,ray,end);
+ float local=terrain_local_upper(camera,a,b);if(local> -15000)return fmaxf(0,local);
+ if(fabsf(a.y)>.985f||fabsf(b.y)>.985f)return 7200;
+ float2 p=geology_uv(a,width),q=geology_uv(b,width);q.x-=floorf((q.x-p.x)/(float)width+.5f)*(float)width;
+ float lowY=fminf(p.y,q.y),highY=fmaxf(p.y,q.y);
+ // Latitude can turn along a great circle; include its analytic extremum.
+ float3 direction=to_world(camera,ray);float ny=camera[6].y,denominator=direction.y*ray.y-ny;
+ if(fabsf(denominator)>.0000001f){
+  float critical=-(earth_radius()+camera[0].y)*(direction.y-ny*ray.y)/denominator;
+  if(critical>start&&critical<end){float3 n=terrain_world(camera,ray,critical);if(fabsf(n.y)>.985f)return 7200;float y=geology_uv(n,width).y;lowY=fminf(lowY,y);highY=fmaxf(highY,y);}
+ }
+ // Small ray segments use the actual bilinear rectangle, not the maximum of
+ // an entire 39 km cell. Padding also encloses local spline source positions.
+ float pad=padding/fmaxf(.15f,sqrtf(1-fmaxf(a.y*a.y,b.y*b.y)));
+ float lowX=fminf(p.x,q.x)-pad,highX=fmaxf(p.x,q.x)+pad;lowY-=padding;highY+=padding;
+ if(floorf(lowX)==floorf(highX)&&floorf(lowY)==floorf(highY)&&lowY>=0&&highY<(float)(width/2-1)){
+  float peak=fmaxf(fmaxf(geology_height_uv(camera,lowX,lowY),geology_height_uv(camera,highX,lowY)),fmaxf(geology_height_uv(camera,lowX,highY),geology_height_uv(camera,highX,highY)));
+  return peak<=0?0:peak+414*eased(20,600,peak)+139*eased(10,250,peak)+.1f;
+ }
+ int x0=(int)floorf(lowX),x1=(int)ceilf(highX),y0=(int)floorf(lowY),y1=(int)ceilf(highY);
+ y0=y0<0?0:y0;y1=y1>=width/2?width/2-1:y1;
+ int span=x1-x0>y1-y0?x1-x0:y1-y0,level=0,offset=(int)camera[22].x;if(span>=width/2)return 7200;
+ while((1<<level)<span&&((width/2)>>level)>1){offset+=(width>>level)*((width/2)>>level);level++;}
+ int w=width>>level,h=(width/2)>>level,xa=(int)floorf((float)x0/(float)(1<<level)),xb=(int)floorf((float)x1/(float)(1<<level)),ya=y0>>level,yb=y1>>level;
+ float peak=-12000;
+ for(int j=0;j<2;j++)for(int i=0;i<2;i++){int x=i==0?xa:xb,y=j==0?ya:yb;y=y>=h?h-1:y;peak=fmaxf(peak,camera[offset+y*w+(x&(w-1))].x);}
+ if(peak<=0)return 0;
+ // Exact amplitude bounds for the procedural land detail, also enclosing
+ // its positive, normalized B-spline reconstruction.
+ return peak+414*eased(20,600,peak)+139*eased(10,250,peak)+.1f;
+}
+__device__ float terrain_trace(const float4 *camera,float3 ray,float sea,float upperHint){
+ if(camera[21].w==0)return -1;
+ float altitude=camera[0].y;
+ // Bound an entirely submerged local segment using the global bilinear
+ // cell's maximum gradient, including the local spline support radius.
+ float4 wet=camera[25];
+ if(camera[31].w==0&&altitude<1000&&sea>0&&sea<2500&&wet.z>sea+(wet.w>0?0:160)&&wet.x+wet.y*(sea+(wet.w>0?0:160))<-.01f)return -1;
+ if(upperHint==0)return -1;float2 bound=sphere_roots(altitude,ray,upperHint>0?upperHint:7200);if(bound.y<=0)return -1;
+ // From orbit, solve the displaced spherical height field with bounded
+ // fixed-point refinements. Close flight uses a first-crossing bracket.
+ if(altitude>30000&&sea>0&&ray.y<-.15f){
+  float t=sea,h=terrain_height(camera,terrain_world(camera,ray,t));
+  if(h<=0)return -1;
+  for(int j=0;j<7;j++){float2 root=sphere_roots(altitude,ray,fmaxf(0,h));if(root.x<=0)return -1;t=root.x;h=terrain_height(camera,terrain_world(camera,ray,t));}
+  return h>0?t:-1;
+ }
+ float start=fmaxf(0,bound.x),end=sea>0?fminf(sea,bound.y):bound.y;
+ if(end<=start)return -1;
+ if(camera[31].w==0&&end<wet.z){
+  float nearest=fminf(end,fmaxf(0,-(earth_radius()+altitude)*ray.y));
+  if(terrain_ray_altitude(altitude,ray,nearest)>wet.x+wet.y*end+.01f)return -1;
+ }
+ // A local tangent-plane seed resolves nearby shores/hills without spending
+ // the horizon budget on metre-sized steps. Refine against spherical height.
+ float slope=camera[24].y*ray.x+camera[24].z*ray.z-ray.y;
+ if(slope>.00001f){
+  float t=(altitude-camera[24].x)/slope;
+  if(t>0&&t<fminf(2500,end)){
+   float refined=terrain_refine(camera,ray,t,2500);
+   if(refined>0&&refined<end)return refined;
+  }
+ }
+ if(ray.y>.65f)return -1;
+ // Keep the fallback sample positions independent of screen-tile bounds.
+ // Moving a silhouette across a tile must not change which thin ridge is hit.
+ bound=sphere_roots(altitude,ray,7200);start=fmaxf(0,bound.x);end=sea>0?fminf(sea,bound.y):bound.y;
+ float previous=start;int detailSteps=fabsf(ray.y)<.02f?64:16;
+ for(int group=0;group<16;group++){
+  float f0=(float)group/16,f1=(float)(group+1)/16;
+  float a=start+(end-start)*f0*f0,b=start+(end-start)*f1*f1;
+  if(camera[31].w==0){
+   float peak=terrain_upper(camera,ray,a,b,.02f),nearest=fminf(b,fmaxf(a,-(earth_radius()+altitude)*ray.y));
+   if(peak==0||terrain_ray_altitude(altitude,ray,nearest)>peak+.01f){previous=b;continue;}
+  }
+  for(int k=1;k<=detailSteps;k++){
+   int i=group*detailSteps+k;
+   float f=(float)i/(float)(16*detailSteps),t=start+(end-start)*f*f;
+   if(terrain_clearance(camera,ray,t)<0){
+    float lo=previous,hi=t;
+    for(int j=0;j<10;j++){float mid=(lo+hi)*.5f;if(terrain_clearance(camera,ray,mid)>0)lo=mid;else hi=mid;}
+    float hit=(lo+hi)*.5f;return terrain_height(camera,terrain_world(camera,ray,hit))>0?hit:-1;
+   }previous=t;
+  }
+ }return -1;
+}
+__device__ float4 underwater_bound(const float4 *camera,float3 n,float h){
+ int width=(int)camera[22].y,height=width/2,offset=(int)camera[22].x;
+ float latitude=atan2f(n.y,sqrtf(n.x*n.x+n.z*n.z));
+ float u=(atan2f(n.x,n.z)/6.2831853f+.5f)*(float)width-.5f,v=(.5f-latitude/3.14159265f)*(float)height-.5f;
+ int x=(int)floorf(u),y=(int)floorf(v);if(y<0||y>=height-1)return make_float4(h,1,0,0);
+ float a=camera[offset+y*width+(x&(width-1))].x,b=camera[offset+y*width+((x+1)&(width-1))].x;
+ float c=camera[offset+(y+1)*width+(x&(width-1))].x,d=camera[offset+(y+1)*width+((x+1)&(width-1))].x;
+ float cell=earth_radius()*6.2831853f/(float)width,dx=cell*fmaxf(.001f,cosf(fabsf(latitude)+6.2831853f/(float)width));
+ float gx=fmaxf(fabsf(b-a),fabsf(d-c))/dx,gz=fmaxf(fabsf(c-a),fabsf(d-b))/cell;
+ float margin=fminf(fminf(fract(u),1-fract(u))*dx,fminf(fract(v),1-fract(v))*cell);
+ return make_float4(h,sqrtf(gx*gx+gz*gz)*1.05f,margin,0);
+}
+
+
+// Share an expanded geographic height bound across each 8x8 pixel tile.
+// The maximum pyramid queries include two extra globe cells on every side.
+__global__ void terrain_tile_heights(float4 *camera,float *hits,int width,int height,int samples,int offset){
+ int tx=blockIdx.x*blockDim.x+threadIdx.x,ty=blockIdx.y*blockDim.y+threadIdx.y,tw=(width+7)/8,th=(height+7)/8;
+ if(tx>=tw||ty>=th)return;
+ if(tx==0&&ty==0)camera[26]=make_float4((float)offset,(float)samples,(float)width,(float)height);
+ float maximum=0;
+ if(camera[0].y>30000||camera[31].w!=0)maximum=7200;
+ else for(int i=0;i<5;i++){
+  float px=(float)(tx*8)+(i==4?4:(i&1)*8),py=(float)(ty*8)+(i==4?4:(i>>1)*8);
+  float sx=(2*px/(float)width-1)*(float)width/(float)height,sy=1-2*py/(float)height;
+  float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
+  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));float sea=globe_hit(camera[0].y,ray),peak=7200;
+  for(int j=0;j<3;j++){
+   float2 bounds=sphere_roots(camera[0].y,ray,peak);if(bounds.y<=0){peak=0;break;}
+   float start=fmaxf(0,bounds.x),end=sea>0?fminf(sea,bounds.y):bounds.y;
+   peak=terrain_upper(camera,ray,start,end,2);if(peak<=0)break;
+  }
+  maximum=fmaxf(maximum,peak);
+ }
+ float seed=-1,furthest=0;int found=0;
+ if(camera[0].y<20000&&camera[31].w==0&&maximum>0)for(int i=0;i<5;i++){
+  float px=(float)(tx*8)+(i==4?4:(i&1)*8),py=(float)(ty*8)+(i==4?4:(i>>1)*8);
+  float sx=(2*px/(float)width-1)*(float)width/(float)height,sy=1-2*py/(float)height;
+  float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
+  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));
+  float t=terrain_trace(camera,ray,globe_hit(camera[0].y,ray),maximum);
+  if(t>0){seed=seed<0?t:fminf(seed,t);furthest=fmaxf(furthest,t);found++;}
+ }
+ // Discontinuous silhouette tiles trace independently. Smooth tiles start
+ // from the nearest of five hits so a rear ridge cannot seed a nearer face.
+ if(found!=5||furthest-seed>fmaxf(32,seed*.08f))seed=-1;
+ int tile=offset+width*height*samples+2*(ty*tw+tx);hits[tile]=maximum;hits[tile+1]=seed;
+}
+__device__ float terrain_tile_upper(const float *hits,const float4 *camera,int x,int y){
+ int width=(int)camera[26].z,height=(int)camera[26].w,samples=(int)camera[26].y,offset=(int)camera[26].x;
+ return hits[offset+width*height*samples+2*((y/8)*((width+7)/8)+x/8)];
+}
+// Keep terrain intersection work out of the optical/material shader. Every
+// PC subpixel gets its own exact ray hit; this is not a reduced-resolution pass.
+// PC reuses the otherwise unused monochrome-light binding. Mobile appends
+// one hit plane after its light map, preserving the eight-buffer render limit.
+__global__ void terrain_intersections(float4 *camera,float *hits,int width,int height,int samples,int offset,int view){
+ int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y,sample=blockIdx.z;
+ if(x>=width||y>=height||sample>=samples)return;
+ float upper=terrain_tile_upper(hits,camera,x,y);
+ if(view>=3||upper==0){hits[offset+sample*width*height+y*width+x]=-1;return;}
+ float px=(float)x+(samples>1?((float)(sample&1)+.5f)*.5f:.5f),py=(float)y+(samples>1?((float)(sample>>1)+.5f)*.5f:.5f);
+ float sx=(2*px/(float)width-1)*(float)width/(float)height,sy=1-2*py/(float)height;
+ float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
+ float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));
+ float hit=-1,seed=hits[offset+width*height*samples+2*((y/8)*((width+7)/8)+x/8)+1];
+ if(view<3){
+  if(seed>0&&camera[31].w==0)hit=terrain_refine(camera,ray,seed,fmaxf(16,seed*.015f));
+  if(hit<=0)hit=terrain_trace(camera,ray,globe_hit(camera[0].y,ray),upper);
+ }
+ hits[offset+sample*width*height+y*width+x]=hit;
+}
+__device__ float terrain_pixel_hit(const float *hits,const float4 *camera,int width,int height,float x,float y,int view){
+ if(camera[21].w==0||view>=3)return -1;
+ int sample=camera[26].y>1?((int)(fract(y)*2))*2+(int)(fract(x)*2):0;
+ return hits[(int)camera[26].x+sample*width*height+(int)y*width+(int)x];
+}
+__device__ float4 cached_water_bound(const float4 *camera,float3 n,float h,float4 fallback){
+ if(camera[27].w==0||camera[31].x!=0)return fallback;
+ float4 east=camera[28],back=camera[29];int width=(int)camera[27].w,offset=(int)east.w;
+ float u=(dotv(n,vec(east.x,east.y,east.z))*earth_radius()/32768+.5f)*(float)width-.5f,v=(dotv(n,vec(back.x,back.y,back.z))*earth_radius()/32768+.5f)*(float)width-.5f;
+ int x=(int)floorf(u),y=(int)floorf(v),radius=(int)camera[30].z+2;
+ if(x<radius+2||y<radius+2||x>=width-radius-2||y>=width-radius-2)return fallback;
+ float dx=0,dz=0;
+ for(int j=-radius;j<=radius;j++)for(int i=-radius;i<=radius;i++){
+  float a=camera[offset+(y+j)*width+x+i].x,b=camera[offset+(y+j)*width+x+i+1].x,c=camera[offset+(y+j+1)*width+x+i].x;
+  dx=fmaxf(dx,fabsf(b-a));dz=fmaxf(dz,fabsf(c-a));
+ }
+ float cell=32768/(float)width,margin=((float)(radius-2)-fmaxf(fract(u),fract(v)))*cell;
+ return make_float4(h,sqrtf(dx*dx+dz*dz)/cell*1.01f,margin,1);
+}
 __global__ void geology_update(float4 *camera,float depth,int enabled){
  float3 n=vec(camera[6].x,camera[6].y,camera[6].z);float4 g=geology_sample(camera,n);
- float actual=enabled!=0?fmaxf(1.4f,-g.x):depth;
- float previous=camera[23].x;
- camera[21]=make_float4(actual,g.x,g.y,(float)enabled);
+ float ground=enabled!=0?terrain_height(camera,n):0;
+ float actual=enabled!=0?fmaxf(.15f,-ground):depth,previous=camera[23].x;
+ camera[21]=make_float4(actual,ground,g.y,(float)enabled);
  camera[23]=make_float4(actual,fabsf(actual-previous)>.001f?1.0f:0.0f,g.z,g.w);
  camera[2].w=actual/.86f;camera[3].w=expf(-actual*.055f);
+ float3 east=vec(camera[5].x,camera[5].y,camera[5].z),back=vec(camera[7].x,camera[7].y,camera[7].z);
+ float e=128/earth_radius(),sx=(terrain_height(camera,unit(plus(n,scale(east,e))))-terrain_height(camera,unit(minus(n,scale(east,e)))))/256;
+ float sz=(terrain_height(camera,unit(plus(n,scale(back,e))))-terrain_height(camera,unit(minus(n,scale(back,e)))))/256;
+ camera[24]=make_float4(ground,sx,sz,camera[0].y-ground);camera[25]=cached_water_bound(camera,n,ground,underwater_bound(camera,n,g.x));
+ if(enabled!=0&&ground>0&&camera[0].y<ground+2){camera[0].y=ground+2;camera[8].x=ground+2;camera[24].w=2;}
+}
+__global__ void terrain_probe(const float4 *points,const float4 *camera,float4 *output,int count,int rays){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z));
+ if(rays!=0){float t=terrain_trace(camera,n,globe_hit(camera[0].y,n),-1);output[i]=make_float4(t,t>0?terrain_clearance(camera,n,t):0,t>0?terrain_height(camera,terrain_world(camera,n,t)):0,0);}
+ else output[i]=make_float4(terrain_height(camera,n),geology_sample(camera,n).x,0,0);
+}
+// Test-only oracle: a dense first-crossing trace without screen seeds, cached
+// height bounds or Newton shortcuts. It never enters the normal frame graph.
+__global__ void terrain_screen_probe(const float4 *points,const float4 *camera,const float *hits,float4 *output,int count){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;
+ int width=(int)camera[26].z,height=(int)camera[26].w,samples=(int)camera[26].y;
+ float4 p=points[i];int x=(int)p.x,y=(int)p.y,sample=(int)p.z,steps=p.w>0?(int)p.w:1024;
+ float px=(float)x+(samples>1?((float)(sample&1)+.5f)*.5f:.5f),py=(float)y+(samples>1?((float)(sample>>1)+.5f)*.5f:.5f);
+ float sx=(2*px/(float)width-1)*(float)width/(float)height,sy=1-2*py/(float)height;
+ float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
+ float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));
+ float actual=hits[(int)camera[26].x+sample*width*height+y*width+x],reference=-1;
+ float2 bound=sphere_roots(camera[0].y,ray,7200);float sea=globe_hit(camera[0].y,ray);
+ float start=fmaxf(0,bound.x),end=sea>0?fminf(sea,bound.y):bound.y,previous=start;
+ if(end>start)for(int j=1;j<=steps;j++){
+  float q=(float)j/(float)steps,t=start+(end-start)*q*q;
+  if(terrain_clearance(camera,ray,t)<0){
+   float lo=previous,hi=t;
+   for(int k=0;k<18;k++){float mid=(lo+hi)*.5f;if(terrain_clearance(camera,ray,mid)>0)lo=mid;else hi=mid;}
+   float hit=(lo+hi)*.5f;if(terrain_height(camera,terrain_world(camera,ray,hit))>0)reference=hit;break;
+  }previous=t;
+ }
+ output[i]=make_float4(actual,reference,actual>0?terrain_clearance(camera,ray,actual):0,terrain_tile_upper(hits,camera,x,y));
 }
 __global__ void geology_probe(const float4 *points,const float4 *plates,const float4 *camera,float4 *output,int count,int seedValue){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z));
@@ -912,16 +1288,19 @@ __global__ void geology_visit(float4 *camera,float2 *navigationState,float targe
   float h=camera[offset+y*width+x].x,h2=camera[offset+y*width+((x+2)&(width-1))].x;
   float fraction=0;int crossing=(h+targetDepth)*(h2+targetDepth)<0?1:0;
   if(crossing!=0)fraction=clamp01((-targetDepth-h)/(h2-h))*2;
-  if(targetDepth<20&&crossing==0)continue;
+  if(targetDepth>0&&targetDepth<20&&crossing==0)continue;
+  if(targetDepth<0&&h<300)continue;
   float lon=(((float)x+.5f+fraction)/(float)width-.5f)*6.2831853f,lat=(.5f-((float)y+.5f)/(float)height)*3.14159265f;
   float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
-  float score=dotv(n,sun)*20-fabsf(h+targetDepth)*(crossing!=0?0:.001f)-fabsf(n.y)*2;
+  float lighting=targetDepth<0?1-fabsf(dotv(n,sun)-.55f):dotv(n,sun);
+  float score=lighting*20-fabsf(h+targetDepth)*(crossing!=0&&targetDepth>0?0:.004f)-fabsf(n.y)*2;
+  if(targetDepth<0)score+=fminf(4,fmaxf(0,-camera[offset+y*width+x].z))*1.8f;
   if(score>best){best=score;bx=(float)x+.5f+fraction;by=(float)y+.5f;}
  }
  float lon=(bx/(float)width-.5f)*6.2831853f,lat=(.5f-by/(float)height)*3.14159265f;
  float3 n=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));
  // Correct the two-cell coarse bracket against the actual bilinear sampler.
- if(targetDepth<20){
+ if(targetDepth>0&&targetDepth<20){
   float lo=lon-6.2831853f*2/(float)width,hi=lon+6.2831853f*2/(float)width;
   float sign=geology_sample(camera,vec(sinf(lo)*cosf(lat),sinf(lat),cosf(lo)*cosf(lat))).x+targetDepth;
   for(int j=0;j<18;j++){float mid=(lo+hi)*.5f;float h=geology_sample(camera,vec(sinf(mid)*cosf(lat),sinf(lat),cosf(mid)*cosf(lat))).x+targetDepth;if(h*sign>0)lo=mid;else hi=mid;}
@@ -931,7 +1310,7 @@ __global__ void geology_visit(float4 *camera,float2 *navigationState,float targe
  navigationState[0]=make_float2(n.x,0);navigationState[1]=make_float2(n.y,0);navigationState[2]=make_float2(n.z,0);
  navigationState[3]=make_float2(east.x,0);navigationState[4]=make_float2(east.y,0);navigationState[5]=make_float2(east.z,0);
  navigationState[6]=make_float2(0,0);navigationState[7]=make_float2(4,0);
- camera[0]=make_float4(0,targetDepth<20?2.6f:8,4,0);camera[1]=make_float4(0,-.32f,0,0);camera[5].w=-1000;camera[19].w=0;
+ camera[0]=make_float4(0,targetDepth<0?terrain_direct(camera,n)+900:(targetDepth<20?2.6f:8),4,0);camera[1]=make_float4(0,-.32f,0,0);camera[5].w=-1000;camera[19].w=0;
 }
 // Two curved cloud decks share the exact density used by near-water shadows.
 // Bounded shell integration avoids a full-screen volumetric march on phones.
@@ -988,13 +1367,15 @@ __device__ float4 cloud_volume(float3 ray,const float4 *camera,float ground){
  }
  return make_float4(color.x,color.y,color.z,1-trans);
 }
-__global__ void weather_cloud_view(float4 *camera,int cloudWidth,int cloudHeight,float aspect){
+__global__ void weather_cloud_view(float4 *camera,const float *hits,int cloudWidth,int cloudHeight,float aspect){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=cloudWidth||y>=cloudHeight)return;
  if(x==0&&y==0)camera[20]=make_float4((float)cloudWidth,(float)cloudHeight,0,0);
  float sx=(2*((float)x+.5f)/(float)cloudWidth-1)*aspect,sy=1-2*((float)y+.5f)/(float)cloudHeight;
  float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));
- camera[131104+y*cloudWidth+x]=cloud_volume(ray,camera,globe_hit(camera[0].y,ray));
+ float ground=globe_hit(camera[0].y,ray),land=terrain_trace(camera,ray,ground,camera[21].w!=0?terrain_tile_upper(hits,camera,(int)(((float)x+.5f)/(float)cloudWidth*camera[26].z),(int)(((float)y+.5f)/(float)cloudHeight*camera[26].w)):-1);
+ if(land>0)ground=land;
+ camera[131104+y*cloudWidth+x]=cloud_volume(ray,camera,ground);
 }
 __device__ float4 cloud_view_sample(const float4 *camera,float sx,float sy){
  int width=(int)camera[20].x,height=(int)camera[20].y;
@@ -1039,12 +1420,44 @@ __device__ float3 space_stars(float3 d){
  float glow=chance>.99965f?(.15f+randf(seed+17u)*.7f):0;
  return vec(glow*.84f,glow*.91f,glow);
 }
-__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int cachedCloud,float pixelU,float pixelV){
+
+__device__ float3 terrain_radiance(const float4 *camera,float3 ray,float t){
+ float3 n=terrain_world(camera,ray,t),axis=fabsf(n.y)>.95f?vec(1,0,0):vec(0,1,0),east=unit(crossv(axis,n)),north=crossv(n,east);
+ float h=0,spacing=fmaxf(32,t*.00045f),step=spacing/earth_radius(),dx=0,dz=0;
+ float4 cached=camera[0].y<20000&&t<30000?terrain_cached_gradient(camera,n):make_float4(0,0,0,-100000);float3 normal=n;
+ if(cached.w> -90000&&camera[0].y<20000&&t<30000){
+  float3 gradient=vec(cached.x,cached.y,cached.z);h=cached.w;dx=dotv(gradient,east);dz=dotv(gradient,north);normal=unit(minus(n,gradient));
+ }else{
+  h=terrain_height(camera,n);
+  dx=(terrain_height(camera,unit(plus(n,scale(east,step))))-terrain_height(camera,unit(minus(n,scale(east,step)))))/(2*spacing);
+  dz=(terrain_height(camera,unit(plus(n,scale(north,step))))-terrain_height(camera,unit(minus(n,scale(north,step)))))/(2*spacing);
+  normal=unit(minus(n,plus(scale(east,dx),scale(north,dz))));
+ }
+ float3 sun=vec(camera[12].x,camera[12].y,camera[12].z);
+ float3 climateP=plus(scale(n,9),vec(17,5,camera[22].z*.01f));
+ float latitude=fabsf(n.y),patches=globe_noise(climateP)*.55f+globe_noise(terrain_rotate(scale(climateP,2.73f)))*.30f+globe_noise(terrain_rotate(scale(climateP,7.31f)))*.15f,texture=globe_noise(terrain_rotate(scale(n,1351)));
+ float grain=globe_noise(vec((camera[0].x+ray.x*t)*.8f,h*.8f,(camera[0].z+ray.z*t)*.8f));
+ float desert=expf(-(latitude-.42f)*(latitude-.42f)*65)*(.28f+.72f*patches);
+ float3 grass=blend(vec(.032f,.075f,.027f),vec(.12f,.14f,.05f),patches);
+ float3 albedo=blend(grass,vec(.38f,.27f,.13f),desert);
+ float rocky=eased(.045f,.19f,sqrtf(dx*dx+dz*dz))*eased(200,1600,h);
+ albedo=blend(albedo,blend(vec(.13f,.115f,.095f),vec(.27f,.24f,.20f),texture),rocky);
+ albedo=blend(albedo,vec(.40f,.33f,.20f),1-eased(2,18,h));
+ float snowline=3900-3300*latitude*latitude+(patches-.5f)*700,snow=eased(snowline-180,snowline+250,h);
+ snow=fmaxf(snow,eased(.91f,.99f,latitude));albedo=blend(albedo,vec(.74f,.80f,.84f),snow);
+ albedo=scale(albedo,.83f+.25f*texture+(grain-.5f)*.16f/(1+t*t*.0001f));
+ float day=clamp01(dotv(n,sun)),direct=clamp01(dotv(normal,sun));
+ float cover=camera[13].w!=0?weather_map_sample(camera,n,0).x:0;
+ float light=.008f+day*.19f+direct*(.95f-cover*.33f);
+ return scale(albedo,light);
+}
+__device__ float3 planet_radiance(float3 ray,const float4 *camera,float hit,int cachedCloud,float pixelU,float pixelV,float landT){
  float altitude=camera[0].y,R=earth_radius();float4 sl=camera[9];float3 sun=vec(sl.x,sl.y,sl.z),worldRay=to_world(camera,ray);
  float visibility=fmaxf(eased(25000,90000,altitude),1-eased(-.12f,.08f,sun.y));
  float3 color=scale(space_stars(camera[13].w!=0?rotate_y(worldRay,camera[13].x*.00007292115f):worldRay),visibility);float sunDot=dotv(ray,sun);
  if(sunDot>.99996f)color=plus(color,vec(18,15,11));
- if(hit>0){
+ if(landT>0){color=terrain_radiance(camera,ray,landT);hit=landT;}
+ else if(hit>0){
   float3 localNormal=unit(vec(ray.x*hit,R+altitude+ray.y*hit,ray.z*hit)),normal=to_world(camera,localNormal);
   float day=clamp01(dotv(localNormal,sun)),limb=1-clamp01(-dotv(localNormal,ray));
   float basin=globe_noise(scale(normal,7));
@@ -1123,7 +1536,7 @@ __global__ void weather_sky(float4 *camera,int skyWidth){
  if(x>=skyWidth||y>=height||camera[0].y>=400)return;
  float angle=(((float)x+.5f)/(float)skyWidth)*6.2831853f,e=((float)y+.5f)/(float)height;e=e*e*1.5707963f;
  float3 ray=vec(sinf(angle)*cosf(e),sinf(e),-cosf(angle)*cosf(e));
- float3 col=planet_radiance(ray,camera,-1,0,0,0);camera[65568+y*skyWidth+x]=make_float4(col.x,col.y,col.z,1);
+ float3 col=planet_radiance(ray,camera,-1,0,0,0,-1);camera[65568+y*skyWidth+x]=make_float4(col.x,col.y,col.z,1);
 }
 __device__ float3 weather_sky_sample(float3 d,const float4 *camera){
  int width=(int)camera[16].x,height=width/4;
@@ -1151,7 +1564,8 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
  float vignette=1-.10f*(sx*sx+sy*sy);
  if(view>=3&&globeT>0){float3 normal=to_world(camera,unit(vec(ray.x*globeT,earth_radius()+pos.y+ray.y*globeT,ray.z*globeT)));return geology_color(geology_sample(camera,normal),view);}
- if(globeT<0||planetMix>=1){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
+ float landT=terrain_pixel_hit(monoLight,camera,width,height,pixelX,pixelY,view);
+ if(globeT<0||planetMix>=1||landT>0){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
  if(globeT>0){
  float t=globeT;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
@@ -1161,12 +1575,13 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflection=minus(ray,scale(n,2*viewCosine));float3 reflected=camera[13].w!=0?weather_sky_sample(reflection,camera):sky(reflection,localSun);
+ if(camera[21].w!=0)depth=fmaxf(.15f,-terrain_height(camera,terrain_world(camera,ray,t)));
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<(smooth!=0?4:2);j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
  travel=fmaxf(0,travel);float3 bed=seabed(bx,bz,pixelFootprint),ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
- float opticalDistance=travel+forward.w;
+ float opticalDistance=travel+(camera[21].w!=0?depth/.86f:forward.w);
  float shadow=camera[13].w!=0?camera[11].y:1;ca=scale(blend(vec(1,1,1),ca,causticDetail*right.w*shadow),.32f+.68f*shadow);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
@@ -1178,7 +1593,7 @@ __device__ float3 shade_pixel(const float4 *brush,const float4 *surface,const fl
  float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);if(camera[13].w!=0)col=surface_weather(col,ray,camera,t);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray,localSun);}
- if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height),planetMix);
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT),planetMix);
  col=scale(col,exposure*vignette);
  return col;
 }
@@ -1193,7 +1608,8 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float globeT=globe_hit(pos.y,ray),planetMix=fmaxf(eased(250,1200,globeT),eased(60,400,pos.y));
  float vignette=1-.10f*(sx*sx+sy*sy);
  if(view>=3&&globeT>0){float3 normal=to_world(camera,unit(vec(ray.x*globeT,earth_radius()+pos.y+ray.y*globeT,ray.z*globeT)));return geology_color(geology_sample(camera,normal),view);}
- if(globeT<0||planetMix>=1){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
+ float landT=terrain_pixel_hit(monoLight,camera,width,height,pixelX,pixelY,view);
+ if(globeT<0||planetMix>=1||landT>0){float3 far=planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT);if(camera[13].w!=0&&pos.y<400)far=surface_weather(far,ray,camera,globeT>0?globeT:3000);return scale(far,exposure*vignette);}
  if(globeT>0){
  float t=globeT;float4 w=make_float4(0,0,0,0);
  for(int i=0;i<(smooth!=0?6:4);i++){float h=smooth!=0?wave_pc(coefficients,brush,pos.x+ray.x*t,pos.z+ray.z*t,1/(1+t*t*.0008f),pressureActive,0).x:wave_height(surface,brush,pos.x+ray.x*t,pos.z+ray.z*t,t,pressureActive);h-=(ray.x*ray.x+ray.z*ray.z)*t*t/(2*earth_radius());t=mixf(t,(h-pos.y)/ray.y,.75f);}
@@ -1203,6 +1619,7 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float grazing=1-clamp01(nv),grazing2=grazing*grazing;
  float fresnel=.02037f+.97963f*grazing2*grazing2*grazing;
  float3 reflection=minus(ray,scale(n,2*viewCosine));float3 reflected=camera[13].w!=0?weather_sky_sample(reflection,camera):sky(reflection,localSun);
+ if(camera[21].w!=0)depth=fmaxf(.15f,-terrain_height(camera,terrain_world(camera,ray,t)));
  float3 transmitted=refract_cosine(ray,n,.7502f,viewCosine);float vertical=fminf(-.1f,transmitted.y);float travel=(-depth-p.y)/vertical;
  float bx=p.x+transmitted.x*travel,bz=p.z+transmitted.z*travel;
  for(int j=0;j<2;j++){travel=(bottom(bx,bz,depth)-p.y)/vertical;bx=p.x+transmitted.x*travel;bz=p.z+transmitted.z*travel;}
@@ -1214,7 +1631,7 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  else bed=seabed(bx,bz,pixelFootprint);
  float3 ca=caustic(light,monoLight,bx,bz,dispersion,lightSize);
  // Light travels down through the water before returning along the view ray.
- float opticalDistance=travel+forward.w;
+ float opticalDistance=travel+(camera[21].w!=0?depth/.86f:forward.w);
  float shadow=camera[13].w!=0?camera[11].y:1;ca=scale(blend(vec(1,1,1),ca,causticDetail*right.w*shadow),.32f+.68f*shadow);
  float attenR=expf(-opticalDistance*.19f),attenG=expf(-opticalDistance*.09f),attenB=expf(-opticalDistance*.055f);
  float3 through=vec(bed.x*(.12f+.95f*ca.x)*attenR+.008f*(1-attenR),bed.y*(.12f+.95f*ca.y)*attenG+.042f*(1-attenG),bed.z*(.12f+.95f*ca.z)*attenB+.075f*(1-attenB));
@@ -1226,7 +1643,7 @@ __device__ float3 shade_pixel_pc(const float4 *brush,const float4 *sandState,con
  float haze=1-expf(-t*.00025f);col=blend(col,scale(vec(.38f,.55f,.68f),.015f+.985f*eased(-.08f,.3f,localSun.y)),haze);if(camera[13].w!=0)col=surface_weather(col,ray,camera,t);
  if(view==1)col=scale(ca,.35f);if(view==2)col=plus(scale(n,.5f),vec(.5f,.5f,.5f));
  }else{col=sky(ray,localSun);}
- if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height),planetMix);
+ if(planetMix>0)col=blend(col,planet_radiance(ray,camera,globeT,1,pixelX/(float)width,pixelY/(float)height,landT),planetMix);
  col=scale(col,exposure*vignette);
  return col;
 }

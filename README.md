@@ -1,10 +1,10 @@
 # ClearWater6.1
 
-[Live demo](https://samg-coder.github.io/ClearWater6.1/) ? [Build and deployment](https://github.com/SamG-Coder/ClearWater6.1/actions/workflows/pages.yml)
+[Live demo](https://samg-coder.github.io/ClearWater6.1/) · [Build and deployment](https://github.com/SamG-Coder/ClearWater6.1/actions/workflows/pages.yml)
 
 ![Shallow water with FFT drag interaction](docs/preview.png)
 
-A CUDA WebShader ocean at Earth scale, with FFT waves, clear shallow-water refraction, sunlight caustics, a procedural seabed, global weather, and a GPU-resident fly camera. The owner explicitly requested adapting weather techniques from `D:\ClearWater`; wind-energy memory and rain rendering now use those ideas. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the exact source and license. The compiler and runtime come from [CUDA WebShader](https://github.com/SamG-Coder/cuda-webshader).
+A CUDA WebShader ocean at Earth scale, with FFT waves, clear shallow-water refraction, sunlight caustics, a procedural seabed, plate-based continents and ocean depths, global weather, and a GPU-resident fly camera. Weather wind-energy memory and rain techniques are adapted from `D:\ClearWater`. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the exact source and license. The compiler and runtime come from [CUDA WebShader](https://github.com/SamG-Coder/cuda-webshader).
 
 ## Run
 
@@ -18,9 +18,9 @@ Open http://127.0.0.1:5191 in a browser with WebGPU enabled. `npm run build` com
 
 ## Explore
 
-Hold the left mouse button and drag across the water to apply force. Right-drag to look, or click **Fly camera** to capture the mouse. **WASD** flies in the viewing direction; **Q/E** lowers/raises the camera; **Shift** boosts speed. Scroll changes speed. **Esc** releases the mouse. Arrow keys look, **H** hides the panel, and **Reset** restores the shallow-water view. The camera stays above the surface; this is an above-water water study.
+Hold the left mouse button and drag across the water to apply force. Right-drag to look, or click **Fly camera** to capture the mouse. **WASD** flies in the viewing direction; **Q/E** lowers/raises the camera; **Shift** boosts speed. Scroll changes flight speed while the mouse is locked; with the mouse free it zooms between the surface and space. Ctrl + scroll zooms while flying. **Esc** releases the mouse. Arrow keys look, **H** hides the panel, and **Reset** restores the shallow-water view. The camera stays above the ocean and maintains two metres of clearance over generated land.
 
-Depth, wave energy, wind, exposure, and render resolution are adjustable. **Shallows** and **Open water** set depth, wave energy, and camera presets. The caustic and normal views expose the rendering components.
+Depth, wave energy, wind, exposure, and render resolution are adjustable. **Shallows** and **Open water** visit a generated coast and deep basin. **Space** shows the globe; **Continents & seafloor → Visit highlands** visits raised terrain. The caustic, normal, bathymetry, and plate views expose the rendering components.
 
 ## CUDA implementation
 
@@ -132,7 +132,7 @@ The optimization regression baseline is now `0bb6aea`, the first local-interacti
 
 ## Earth-scale ocean and space flight
 
-The ocean now wraps an analytic sphere with a radius of 6,371,000 metres (diameter 12,742 km). All distances and travel speeds use metres and seconds. This is a procedural ocean planet at Earth's mean spherical size; the project does not contain geographical land or elevation data. Close to the surface, the original FFT water, refraction, caustics, sand and local touch wake remain available. Distant rays transition to the curved ocean, a procedural cloud layer, an approximate exponential atmosphere, sunlight and stars. The same camera and spherical intersection run throughout the transition.
+The ocean now wraps an analytic sphere with a radius of 6,371,000 metres (diameter 12,742 km). All distances and travel speeds use metres and seconds. This is a procedural ocean planet at Earth's mean spherical size; the land and elevation are procedurally generated, not measured Earth geography. Close to the surface, the original FFT water, refraction, caustics, sand and local touch wake remain available. Distant rays transition to the curved ocean, a procedural cloud layer, an approximate exponential atmosphere, sunlight and stars. The same camera and spherical intersection run throughout the transition.
 
 - WASD flies; Q/E descend and rise relative to the current planetary surface. Shift boosts speed.
 - With the mouse free, wheel-out smoothly retreats toward space and wheel-in approaches the water. Travel speed grows with altitude.
@@ -140,7 +140,7 @@ The ocean now wraps an analytic sphere with a radius of 6,371,000 metres (diamet
 - The Space preset frames the entire globe. Shallows or Reset returns to the surface.
 - On touch devices, pinch inward to retreat and spread two fingers to approach. The movement joystick, altitude buttons and screen-drag look remain available. Pinching never pushes the water.
 
-The camera follows great-circle steps and transports its local frame across poles. A single CUDA invocation uses software double arithmetic, stored as high/low float pairs; a small double polynomial rotation avoids the accumulated error of native shader trigonometry. Rendering stays float32 and camera-relative, with altitude separate from the 6,371 km radius. The FFT/material chart remains bounded for close-up precision; it is a local procedural detail layer, not a globally persistent terrain map. There is no planet-sized FFT allocation. A 160-byte telemetry read every 15 frames updates altitude, speed and local weather labels independently of rendering.
+The camera follows great-circle steps and transports its local frame across poles. A single CUDA invocation uses software double arithmetic, stored as high/low float pairs; a small double polynomial rotation avoids the accumulated error of native shader trigonometry. Rendering stays float32 and camera-relative, with altitude separate from the 6,371 km radius. The FFT/material chart remains bounded for close-up precision; it is a local procedural detail layer, not a globally persistent terrain map. There is no planet-sized FFT allocation. A 256-byte telemetry read every 15 frames updates altitude, speed and local weather labels independently of rendering.
 
 `npm run test:planet` checks spherical ray intersections against independent JavaScript double equations, an entire Earth circuit, metre-scale movement on the far side, pole crossing, actual wheel input, flight-speed adjustment, touch pinch input, and real 1440p/4K space framebuffers. It also saves views from orbital height down to the shallow water. The atmosphere and cloud layer are visual approximations. Browser tests use local NVIDIA/Edge and Chromium phone emulation; physical Samsung and Safari behaviour still requires device testing.
 
@@ -174,10 +174,36 @@ The weather release resets the image/shader optimization baseline to `95085db`. 
 
 **Seafloor → Plate-based globe** follows a seeded spherical terrain field as you fly. **Shallows** searches the generated coastline for a daylight shallow patch; **Open water** visits a deep basin. The manual depth slider selects **Manual depth study** for the original optical experiments. **Bathymetry** and **Plates** views show the underlying field without weather obscuring it. Changing **World seed** rebuilds a deterministic world.
 
-Twenty-eight irregular best-candidate sites define spherical Voronoi plates. Each has a seeded Euler rotation and crust classification. Relative tangent velocity distinguishes opening and closing boundaries. A spreading-distance age proxy deepens oceanic crust away from ridges; convergent oceanic boundaries create trenches, while continental crust produces shelves and uplift. The geological ideas follow [USGS's plate-boundary overview](https://pubs.usgs.gov/gip/dynamic/understanding.html). This is synthetic geography and a kinematic landform approximation, not measured Earth bathymetry, an evolved plate reconstruction, or a mantle/erosion simulation. This first depth checkpoint leaves continental crust submerged at a minimum depth of 1.4 m; raised continents follow separately.
+Twenty-eight irregular best-candidate sites define spherical Voronoi plates. Each has a seeded Euler rotation and crust classification. Relative tangent velocity distinguishes opening and closing boundaries. A spreading-distance age proxy deepens oceanic crust away from ridges; convergent oceanic boundaries create trenches, while continental crust produces shelves and uplift. The geological ideas follow [USGS's plate-boundary overview](https://pubs.usgs.gov/gip/dynamic/understanding.html). This is synthetic geography and a kinematic landform approximation, not measured Earth bathymetry, an evolved plate reconstruction, or a mantle/erosion simulation. The initial depth checkpoint submerged continental crust. The following continent stage exposes its signed elevations as land, with a 0.15 m lower bound for water simulation depth.
 
 CUDA builds a 1024 × 512 depth/crust/boundary cache on desktop, or 512 × 256 on touch devices, only when the seed changes. It costs 8 MiB or 2 MiB, plus a 896-byte plate table and 128 KiB of wave-phase offsets. The same GPU field drives distant shallow-water color and local refraction, light attenuation, caustic depth, sediment response, and finite-depth FFT dispersion. The local optical/FFT patch uses the depth beneath the camera, an approximation over that small patch. A frequency change preserves the accumulated phase instead of making waves jump. Depth labels use the existing asynchronous telemetry read and do not drive the simulation.
 
 `npm run test:geology` checks sites and nearest-plate ownership against an independent CPU oracle, depth distribution, a disabled-tectonics negative control, poles/longitude continuity, seed reproducibility and variation, cache reuse, manual depth, GPU dispersion, phase continuity, and actual 1440p/4K rendering. The older water/weather/planet tests explicitly select the manual-depth study to isolate their existing checks. Geology has its own default-world coverage. Phone checks remain viewport/input emulation on desktop hardware.
 
 The plate-depth release sets the image/shader optimization baseline to `efd7771`, accepting the generated depth field and phase-preserving dispersion changes.
+
+
+## Raised continents and coastal flight
+
+The default globe now renders the generated continents above sea level. **Continents & seafloor → Visit highlands** places the camera over a sunlit inland region. **Shallows** returns to a generated coast; **Space** shows the whole world. Changing the seed changes plates, basins, coastlines and landforms together. No external maps, models or image textures are used.
+
+CUDA intersects the raised spherical height field and shades coastal sand, grassland, dry regions, exposed rock, and elevation/latitude-dependent snow. The global plate field supplies broad relief and coastlines; rotated world-space detail bands add local hills and crags. Fine relief fades smoothly between 20 and 180 km of camera altitude toward the cached planet-scale relief. This is an altitude-based approximation, not a full terrain LOD hierarchy. A camera-local 32.768 km spherical cache holds the detailed height field at 1024² on desktop or 512² on touch devices (16 MiB / 4 MiB). Continuous-curvature reconstruction shares its height and analytic gradient; it avoids a visible grid in the land normals. The cache remains fixed while turning and rebuilds after 4 km of travel or a seed change. Full-resolution PC shading still uses four spatial samples, including land edges. The camera keeps a two-metre minimum clearance over land, dry ground rejects water-pressure brushes, and the cloud view stops against terrain. Close water samples the local seafloor depth beneath each water hit.
+
+This is the first procedural continent implementation. It has no erosion/river solver, vegetation geometry, measured geography, or geological time evolution. Land intersection is bounded: distant downward views use displaced-sphere refinements, while close/grazing views use a local plane estimate and a 256-interval first-crossing search with bisection, increased to 1024 for nearly horizontal rays. Maximum-height bounds skip empty groups of intervals without lowering that search density. This resolves the tested terrain but is not a proof against every grazing silhouette or arbitrarily narrow peak. The shader remains float32 and camera-relative.
+
+Maximum-height pyramids add about 2.67 MiB / 0.67 MiB to the global terrain cache and 5.33 MiB / 1.33 MiB to the local cache. Shared camera, weather and terrain storage now reserves about 98 MiB on desktop or 26 MiB on touch devices. A separate full-resolution intersection pass stores one depth per PC subpixel, with geographic bounds and starting estimates shared across 8×8 screen tiles. Each ray refines its own hit and falls back to a fresh search if refinement fails. Height and slope calculations share the same fetched samples. This preserves four spatial samples at actual 4K, using about 127.6 MiB for intersection and tile data; the single-sample 448×912 mobile case uses about 1.61 MiB. Allocations respect the device storage-binding limit. Shader pipelines for inactive profiles and diagnostic probes are created only when needed.
+
+`npm run test:continents` compares 1536 screen and horizon rays with a separate 1024-interval reference trace, including an intentionally coarse negative control and checks actual land intersections against independently reconstructed double-precision spherical points, a vertical-distance oracle, ground clearance, rejected dry-land water forces, stable terrain under camera rotation and cache recentering, the Highlands control, default coast/orbit/night screenshots, and real 1440p/4K render sizes. `npm run test:geology` retains the seed, plate, seam, depth and wave-dispersion checks. Published builds also receive a browser smoke check after Pages finishes deploying.
+
+
+The 2026-10-02 continent checkpoint measured the following on desktop NVIDIA Blackwell with Edge. These are median / p95 **GPU compute milliseconds**, including advancing water/weather and cache refreshes when due; they exclude canvas copy and physical display. Near views use 30 timing samples, orbital views 40, with all four PC spatial samples retained.
+
+| View | 2560 × 1440 | 3840 × 2160 |
+| --- | ---: | ---: |
+| Generated coast | 18.09 / 19.67 ms | 35.59 / 39.01 ms |
+| Highlands | 19.40 / 21.50 ms | 34.29 / 36.23 ms |
+| Orbital globe | 1.77 / 2.36 ms | 3.51 / 4.12 ms |
+
+Close terrain still exceeds a 60 FPS budget at these high resolutions and needs further optimization. The initial shader preparation took about 28 seconds on this machine. A 448 × 912 mobile viewport measured 3.16 / 5.25 ms on the same desktop GPU; this does **not** establish performance on a Samsung A34 or Safari/iPhone. The phone profile keeps its automatic resolution cap and frame pacing.
+
+All sampled hit masks matched the dense reference. Maximum hit-distance differences were 0.045 m at the coast and 0.576 m in the highlands. The coarse negative control disagreed on 14 rays, demonstrating that the test detects skipped foreground ridges. The local height cache differed from direct evaluation by 0.095 m RMS / 0.270 m maximum at the sampled points; recentering after flight changed those heights by at most 0.092 m. These are measured checks for the supplied scenes, not global error bounds for every seed or grazing ray.
