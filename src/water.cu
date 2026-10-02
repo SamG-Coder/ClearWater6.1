@@ -1874,6 +1874,12 @@ __device__ float3 craft_water(float3 col,float3 p,float3 n,float3 ray,const floa
   float amount=source.w/(4+d2)*(1-eased(1600,3600,d2))*cone*(nl*(.025f+foam*.3f)+spec);
   float3 hue=i<2?vec(brush[11].x,brush[11].y,brush[11].z):vec(.68f,.84f,1);col=plus(col,scale(hue,amount));
  }
+ for(int i=0;i<2;i++){
+  if((float)i>=brush[12].x)break;float4 source=brush[13+i*2];float3 delta=minus(vec(source.x,source.y,source.z),p);float d2=dotv(delta,delta);if(d2>6400)continue;
+  float3 l=unit(delta),h=unit(minus(l,ray));float nh=fmaxf(0,dotv(n,h)),den=nh*nh*(.018f-1)+1;
+  float amount=source.w/(8+d2)*(1-eased(2500,6400,d2))*(fmaxf(0,dotv(n,l))*.1f+.00025f/(den*den+.00001f));
+  float4 hue=brush[14+i*2];col=plus(col,scale(vec(hue.x,hue.y,hue.z),amount));
+ }
  return col;
 }
 __device__ float3 craft_spray(float3 col,float3 ray,const float4 *camera,const float4 *brush,float limit){

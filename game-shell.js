@@ -50,7 +50,7 @@ export function createGameShell(host){
   $('flightLoading').classList.toggle('compact-loading',page!=='boot');
   for(const el of root.querySelectorAll('[data-screen]'))el.hidden=el.dataset.screen!==page;
   $('menuContext').textContent=page==='main'?'FLIGHT SYSTEM / 6.1':page==='setup'?'FLIGHT SYSTEM / REGISTRATION':page==='boot'?'FLIGHT SYSTEM / PRE-FLIGHT':kind==='normal'?'GAME / PAUSED':kind==='free'?'FREE ROAM / PAUSED':'FLIGHT SYSTEM / SETTINGS';
-  $('menuFooterHint').textContent=page==='main'||page==='boot'?'A whole planet. An open sky.':page==='settings'?'Changes are saved automatically.':page==='pause'?'Simulation paused · Take your time.':'Your existing flight is safe until you launch.';
+  $('menuFooterHint').textContent=page==='main'||page==='boot'?'A whole planet. An open sky.':page==='settings'?'Changes are saved automatically.':page==='pause'?'Simulation paused · Take your time.':page==='defeat'?'Last checkpoint preserved.':'Your existing flight is safe until you launch.';
   $('settingsWorldTab').hidden=kind!=='free';
   $('settingsShipTab').hidden=!kind;
   if(page==='setup')$('setupColours').append($('shipColours'));
@@ -109,15 +109,15 @@ export function createGameShell(host){
  function settings(from){origin=from;tab('graphics');show('settings');}
  function persist(){
   if(savePromise)return savePromise;
-  if(kind!=='normal'||!ready)return Promise.resolve(true);
+  if(kind!=='normal'||!ready||host.canSave?.()===false)return Promise.resolve(true);
   saveBusy=true;lastSave=performance.now();
   savePromise=(async()=>{
-   try{const snapshot=await host.snapshot();snapshot.version=1;snapshot.savedAt=Date.now();snapshot.identity=structuredClone(identity);if(!validSave(snapshot))throw Error('Flight state is not ready');localStorage.setItem(SAVE_KEY,JSON.stringify(snapshot));save=snapshot;storageIssue='';updateSave();return true;}
+   try{const snapshot=await host.snapshot();if(snapshot.ship[67]===61&&snapshot.ship[56]<=0)return true;snapshot.version=1;snapshot.savedAt=Date.now();snapshot.identity=structuredClone(identity);if(!validSave(snapshot))throw Error('Flight state is not ready');localStorage.setItem(SAVE_KEY,JSON.stringify(snapshot));save=snapshot;storageIssue='';updateSave();return true;}
    catch(e){storageIssue='Could not save this flight. Browser storage may be full or unavailable.';updateSave();status(storageIssue,true);host.notice(storageIssue);return false;}
    finally{saveBusy=false;savePromise=null;}
   })();return savePromise;
  }
- function resume(){if(pending||loading||!kind)return;if(previewing)stopPreview();page='playing';root.hidden=true;document.body.classList.remove('menu-open','menu-main');document.body.append($('fullscreen'));host.resume();status('');if(storageIssue)host.notice(storageIssue);}
+ function resume(){if(pending||loading||!kind||page==='defeat')return;if(previewing)stopPreview();page='playing';root.hidden=true;document.body.classList.remove('menu-open','menu-main');document.body.append($('fullscreen'));host.resume();status('');if(storageIssue)host.notice(storageIssue);}
  function pause(){if(page!=='playing'||pending)return;show('pause');status('');void persist();}
  async function start(next,existing=null,registration=null){
   if(!ready||loading||pending)return;pending=true;root.setAttribute('aria-busy','true');for(const b of root.querySelectorAll('[data-launch]'))b.disabled=true;status(existing?'Restoring your flight…':'Preparing your spacecraft…');
@@ -125,6 +125,8 @@ export function createGameShell(host){
   catch(e){status('Could not launch: '+e.message,true);}
   finally{pending=false;root.removeAttribute('aria-busy');for(const b of root.querySelectorAll('[data-launch]'))b.disabled=!ready;updateSave();}
  }
+ $('recoverCraft').onclick=async()=>{if(pending)return;pending=true;$('recoverCraft').disabled=true;status('Recovering your craft…');try{await host.recover();page='pause';await persist();pending=false;resume();}catch(e){status('Recovery failed: '+e.message,true);}finally{pending=false;$('recoverCraft').disabled=false;}};
+ $('defeatMain').onclick=()=>{if(!pending){show('main');status('');}};
  $('continueGame').onclick=()=>start('normal',save);
  $('newGame').onclick=async()=>{if(!ready||loading||pending)return;draft={pilotName:'',shipName:'',colours:{...DEFAULT_COLOURS}};$('pilotName').value='';$('newShipName').value='';setColourInputs(draft.colours);show('setup');registrationChanged();await beginPreview(draft);};
  $('newFlightForm').onsubmit=e=>{e.preventDefault();registrationChanged();if(pending||!validIdentity(draft))return;if(save){$('newFlightSummary').textContent=`${draft.pilotName} · ${draft.shipName}`;show('confirm');}else void start('normal',null,draft);};
@@ -155,6 +157,6 @@ export function createGameShell(host){
   error(message){if(page==='playing')show('pause');$('bootStatus').textContent='FLIGHT SYSTEM UNAVAILABLE';},
   async tick(now){if(page==='playing'&&kind==='normal'&&now-lastSave>30000)await persist();},
   updateThrottle(value){$('throttle').value=String(value);$('throttleValue').textContent=Math.round(value*100)+'%';},
-  pause,preferences
+  defeat(){if(kind!=='normal')return;show('defeat');status('');},pause,preferences
  };
 }

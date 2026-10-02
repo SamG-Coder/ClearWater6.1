@@ -2,6 +2,7 @@ import {GpuRuntime} from './vendor/webcuda/runtime/runtime.js';
 import {createGameShell} from './game-shell.js';
 import {createFlightLoading} from './flight-loading.js';
 import {paletteBytes} from './ship-profile.js';
+import {createCombatHUD} from './combat-hud.js';
 const assetVersion=new URL(import.meta.url).searchParams.get('v')||'local';
 const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
@@ -25,6 +26,10 @@ let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=f
 const params=new URLSearchParams(location.search),shipMode=params.get('mode')==='ship'||(!params.has('t')&&params.get('mode')!=='explorer');
 let shipMesh,shipBounds,shipData,shipInspect=false,shipAction=0;
 let craftPreview=null;
+let enemyMesh,enemyBounds,combatState,combatTiles,combatTileBytes=0,combatWeapon=0,combatFiring=false,combatMouseFiring=false,combatFixtureMode=0,combatCount=3,combatDead=false;
+const combatKernels=['ship_enemy_mesh','combat_step','combat_prepare','combat_tiles','combat_render'];
+const combatHUD=createCombatHUD({select(value){combatWeapon=value;},fire(value){combatFiring=value;},active(){return flightProfile===1&&!gameShell?.open&&!shipInspect;}});
+const combatActive=()=>shipMode&&flightProfile===1&&!craftPreview;
 if(shipMode){document.title='ClearWater6.1 · Spacecraft flight';document.body.classList.add('ship-mode','clean');speed=40;touchLook=true;$('toggle').textContent='Settings';if(!touchDevice)$('quality').value=innerWidth>=3840?'3840':innerWidth>=2560?'2560':'1920';}
 diagnostics.shipMode=shipMode;
 const fixed=params.get('t');if(fixed!==null){time=Number(fixed);playing=false;}
@@ -77,20 +82,20 @@ for(const event of ['fullscreenchange','webkitfullscreenchange'])document.addEve
 
 $('quality').onchange=()=>{adaptiveScale=1;frameAverage=0;adaptCount=0;requestQuality();};
 for(const id of ['shallows','ocean'])$(id).onclick=()=>{const ocean=id==='ocean';$('depth').value=ocean?8:1.4;$('energy').value=ocean?1.8:.8;reset=ocean?2:1;for(const p of ['shallows','ocean'])$(p).classList.toggle('active',p===id);labels();};
-addEventListener('keydown',e=>{if(gameShell?.open)return;if(shipMode&&e.code==='KeyV'&&!e.repeat&&!['INPUT','SELECT'].includes(document.activeElement.tagName))$('shipInspect').click();if(e.code==='Escape'){document.exitPointerLock?.();drag=false;held=false;forceMoved=false;flyFallback=false;lockPending=false;flyStatus('');if(!touchDevice){$('fly').textContent='Fly camera ↗';$('fly').setAttribute('aria-pressed','false');}}if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
-addEventListener('keyup',e=>keys.delete(e.code));addEventListener('blur',()=>{keys.clear();drag=false;held=false;});
+addEventListener('keydown',e=>{if(gameShell?.open)return;if(shipMode&&e.code==='KeyV'&&!e.repeat&&!['INPUT','SELECT'].includes(document.activeElement.tagName))$('shipInspect').click();if(e.code==='Escape'){document.exitPointerLock?.();drag=false;held=false;forceMoved=false;flyFallback=false;lockPending=false;flyStatus('');if(!touchDevice){$('fly').textContent='Fly camera ↗';$('fly').setAttribute('aria-pressed','false');}}if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;if(flightProfile&&/^Digit[123]$/.test(e.code))combatHUD.select(Number(e.code.slice(-1))-1);keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
+addEventListener('keyup',e=>keys.delete(e.code));addEventListener('pointerup',e=>{if(e.pointerType!=='touch'&&e.button===0)combatMouseFiring=false;});addEventListener('blur',()=>{keys.clear();drag=false;held=false;combatMouseFiring=false;combatHUD.stopFire();});
 function pointer(e){const r=canvas.getBoundingClientRect(),x=2*(e.clientX-r.left)/r.width-1,y=1-2*(e.clientY-r.top)/r.height;if(x!==pointerX||y!==pointerY)forceMoved=true;pointerX=x;pointerY=y;}
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 const zoomTouches=new Map();let pinchGap=0;
 let touchPointer=null,touchLastX=0,touchLastY=0;
-function endPointer(e){zoomTouches.delete(e.pointerId);if(zoomTouches.size<2)pinchGap=0;if(touchPointer===null||e.pointerId===touchPointer){drag=false;held=false;forceMoved=false;touchPointer=null;}}
+function endPointer(e){if(e.pointerType!=='touch'&&(e.button===0||e.type!=='pointerup'))combatMouseFiring=false;zoomTouches.delete(e.pointerId);if(zoomTouches.size<2)pinchGap=0;if(touchPointer===null||e.pointerId===touchPointer){drag=false;held=false;forceMoved=false;touchPointer=null;}}
 canvas.addEventListener('pointerdown',e=>{
  if(gameShell?.open)return;
  if(e.pointerType==='touch'){zoomTouches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(zoomTouches.size===2){const [a,b]=[...zoomTouches.values()];pinchGap=Math.hypot(a.x-b.x,a.y-b.y);held=drag=forceMoved=false;touchPointer=null;canvas.setPointerCapture(e.pointerId);return;}}
  if(e.pointerType==='touch'&&touchPointer!==null)return;
  pointer(e);forceMoved=false;
  if(e.pointerType==='touch'){touchPointer=e.pointerId;drag=touchLook;held=!touchLook;touchLastX=e.clientX;touchLastY=e.clientY;}
- else{canvas.focus({preventScroll:true});if(shipMode){held=false;drag=true;}else{held=e.button===0&&!flyFallback;drag=e.button===2||(e.button===0&&flyFallback);}}
+ else{canvas.focus({preventScroll:true});if(shipMode){held=false;drag=true;if(e.button===0&&document.pointerLockElement===canvas)combatMouseFiring=true;}else{held=e.button===0&&!flyFallback;drag=e.button===2||(e.button===0&&flyFallback);}}
  canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove',e=>{
@@ -145,18 +150,19 @@ function resize(){
  const pixelLimit=Math.floor((runtime.device.limits.maxStorageBufferBindingSize-(mobile?texels*4:0))/(samples*4+.125));
  const w=Math.max(64,Math.floor(Math.min(desiredWidth,Math.sqrt((pixelLimit-8192)*aspect))/64)*64),h=Math.max(8,Math.round(w/aspect/8)*8);
  const needed=(w*h*samples+2*Math.ceil(w/8)*Math.ceil(h/8)+(mobile?texels:0))*4;
- if(needed!==geometryBytes){runtime.destroyBuffer(monoLight);monoLight=runtime.createBuffer(needed);geometryBytes=needed;diagnostics.geometryStorageBytes=needed-(mobile?texels*4:0);kernels.caustic_resolve.clear();kernels.terrain_intersections.clear();kernels.terrain_tile_heights.clear();kernels.weather_cloud_view.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();}
+ if(needed!==geometryBytes){runtime.destroyBuffer(monoLight);monoLight=runtime.createBuffer(needed);geometryBytes=needed;diagnostics.geometryStorageBytes=needed-(mobile?texels*4:0);kernels.caustic_resolve.clear();kernels.terrain_intersections.clear();kernels.terrain_tile_heights.clear();kernels.weather_cloud_view.clear();kernels.combat_render.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();}
  const cloudScale=Math.min(.5,(touchDevice||mobile?960:1920)/Math.max(w,h)),cloudWidth=Math.max(8,Math.ceil(w*cloudScale/8)*8),cloudHeight=Math.max(8,Math.ceil(h*cloudScale/8)*8),cloudBytes=cloudWidth*cloudHeight*16;
  if(cloudBytes!==cloudStorageBytes){if(cloudScratch)runtime.destroyBuffer(cloudScratch);cloudScratch=runtime.createBuffer(cloudBytes);cloudStorageBytes=cloudBytes;kernels.weather_cloud_filter.clear();}
  diagnostics.cloudWidth=cloudWidth;diagnostics.cloudHeight=cloudHeight;diagnostics.cloudFilterBytes=cloudBytes;diagnostics.nearTerrainSpacing=2048/nearTerrainWidth;diagnostics.nearTerrainBytes=nearTerrainWidth*nearTerrainWidth*32+128;
  diagnostics.mobile=mobile;diagnostics.targetFps=mobile?30:60;diagnostics.adaptiveScale=adaptiveScale;diagnostics.photonRays=mobile?256:(pcQuality()?1024:512);
  if(w===width&&h===height)return;weatherDirty=true;
+ if(shipMode){const bytes=Math.ceil(w/32)*Math.ceil(h/32)*12;if(bytes!==combatTileBytes){if(combatTiles)runtime.destroyBuffer(combatTiles);combatTiles=runtime.createBuffer(bytes);combatTileBytes=bytes;kernels.combat_tiles.clear();kernels.combat_render.clear();}}
  if(image)runtime.destroyBuffer(image);width=w;height=h;canvas.width=w;canvas.height=h;image=runtime.createBuffer(w*h*4);
  context.configure({device:runtime.device,format:'rgba8unorm',usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT,alphaMode:'opaque'});
- diagnostics.width=w;diagnostics.height=h;kernels.ship_render.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();
+ diagnostics.width=w;diagnostics.height=h;kernels.combat_render.clear();kernels.ship_render.clear();kernels.render.clear();kernels.render_pc.clear();kernels.render_pc_single.clear();
  updateMetrics();
 }
-function qualityKernels(){return [...(mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render']),...(shipMode?['ship_step','ship_wash_pick','ship_wash_modes','ship_render','ship_mesh','ship_bounds']:[])];}
+function qualityKernels(){return [...(mobileProfile()?['render']:pcQuality()?['render_pc','surface_coefficients','sand_transport']:['render']),...(shipMode?['ship_step','ship_wash_pick','ship_wash_modes','ship_render','ship_mesh','ship_bounds',...combatKernels]:[])];}
 function requestQuality(){if(!gameShell||!diagnostics.ready||failed)return;const profile=$('quality').selectedOptions[0].textContent;if(!flightLoading.active&&qualityKernels().some(name=>!kernels[name]?.loaded))flightLoading.begin('profile',profile);else flightLoading.profile(profile);}
 async function ensureKernels(names,report=false){
  const missing=[...new Set(names)].filter(name=>!kernels[name]?.loaded);if(!missing.length)return;
@@ -169,7 +175,7 @@ async function ensureKernels(names,report=false){
 }
 function bind(name,buffers,scalars={}){return kernels[name].bind(buffers,scalars);}
 function compute(dt,timestampWrites){
- const b=runtime.batch({timestampWrites});
+ const b=runtime.batch({timestampWrites}),combat=combatActive();
  const geoWidth=touchDevice?512:1024,geoSeed=Math.max(1,Math.min(999999,Math.floor(Number($('worldSeed').value)||1))),geoEnabled=Number($('depthMode').value);
  if(geoSeed!==geologySeed||geoWidth!==geologySize){
   b.dispatch(bind('geology_seed',{plates,camera},{seedValue:geoSeed,mapWidth:geoWidth,offset:geologyOffset}),[1,1,1]);
@@ -194,7 +200,7 @@ function compute(dt,timestampWrites){
  if(visitRain){b.dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude:0,longitude:0,altitude:5,findRain:1,mapSize:mapResolution}),[1,1,1]);visitRain=false;weatherDirty=true;}
  if(visitTerrain){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:-2500,clock:weatherClock,season:weatherSeason}),[1,1,1]);visitTerrain=false;weatherDirty=true;}
  if(geoEnabled&&(reset===1||reset===2)){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:reset===1?1.4:4500,clock:weatherClock,season:weatherSeason}),[1,1,1]);reset=0;weatherDirty=true;}
- if(shipMode)b.dispatch(bind('ship_step',{camera,navigationState:navigation,ship:shipData},{deltaTime:playing?dt:0,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),turn:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),rise:Math.max(-1,Math.min(1,axis('KeyE','KeyQ')+(keys.has('Space')?1:0))),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed,boost:keys.has('ShiftLeft')||keys.has('ShiftRight')?1:0,action:shipAction,inspect:shipInspect?1:0,flightProfile,depth,aspect:width/height}),[1,1,1]);
+ if(shipMode)b.dispatch(bind('ship_step',{camera,navigationState:navigation,ship:shipData},{deltaTime:playing&&!combatDead?dt:0,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),turn:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),rise:Math.max(-1,Math.min(1,axis('KeyE','KeyQ')+(keys.has('Space')?1:0))),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed,boost:keys.has('ShiftLeft')||keys.has('ShiftRight')?1:0,action:shipAction,inspect:shipInspect?1:0,flightProfile,depth,aspect:width/height}),[1,1,1]);
  else b.dispatch(bind('camera_step',{camera,navigationState:navigation},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),zoom:zoomDelta,reset,depth}),[1,1,1]);
  shipAction=0;zoomDelta=0;reset=0;lookX=lookY=0;
  b.dispatch(bind('terrain_cache_setup',{camera},{width:terrainWidth,offset:terrainOffset,enabled:geoEnabled,nearWidth:nearTerrainWidth,nearOffset:nearTerrainOffset}),[1,1,1]);
@@ -213,6 +219,7 @@ function compute(dt,timestampWrites){
   for(let axis=0;axis<2;axis++)b.dispatch(bind('weather_cloud_filter',{camera,scratch:cloudScratch},{width:cloudWidth,height:cloudHeight,axis}),[cloudWidth/8,cloudHeight/8,1]);
  }
  weatherDirty=false;weatherRefresh=0;lastWeatherMode=weatherEnabled;weatherSize=mapResolution;diagnostics.weatherClock=weatherClock;diagnostics.weatherEnabled=weatherEnabled===1;
+ if(combat)b.dispatch(bind('combat_step',{state:combatState,ship:shipData,camera,brush},{deltaTime:playing&&!combatDead?dt:0,firing:!shipInspect&&(combatFiring||combatMouseFiring||keys.has('KeyF'))?1:0,weapon:combatWeapon,enemyCount:combatCount,resetCombat:0,fixture:combatFixtureMode}),[1,1,1]);
  if(shipMode)b.dispatch(bind('ship_wash_pick',{camera,ship:shipData,brush}),[1,1,1]);
  else b.dispatch(bind('brush_pick',{surface,camera,brush},{pointerX,pointerY,aspect:width/height,held:held?1:0,moving:forceMoved?1:0,pressureActive:disturbanceActive?1:0}),[1,1,1]);forceMoved=false;
  if(geoEnabled||depth!==lastDepth){b.dispatch(bind('prepare_modes',{motion,camera},{depth,time}),[16,16,3]);lastDepth=depth;diagnostics.dispersionSeeds=(diagnostics.dispersionSeeds||0)+1;}
@@ -229,6 +236,7 @@ function compute(dt,timestampWrites){
  b.dispatch(bind('caustic_resolve',{photons,light,monoLight},{normalization:4096*(rays/lightSize)**2,dispersion,lightSize}),[lightSize/8,lightSize/8,1]);
  if(geoEnabled&&!(profileSkip&1))b.dispatch(bind('terrain_intersections',{camera,hits:monoLight},{width,height,samples,offset:mobileProfile()?lightSize*lightSize:0,view}),[width/8,height/8,samples]);
  if(!(profileSkip&2))b.dispatch(bind(pcQuality()?(samples===4?'render_pc':'render_pc_single'):'render',{brush,...(pcQuality()?{sandState}:{}),surface,coefficients:pcQuality()?coefficients[1]:surface,light,monoLight,camera,image},{width,height,depth,exposure,view,pressureActive:disturbanceActive?1:0,dispersion,lightSize}),[width/32,height/2,1]);
+ if(combat&&!(profileSkip&16)){b.dispatch(bind('combat_prepare',{state:combatState,ship:shipData,camera},{width,height}),[2,1,1]);b.dispatch(bind('combat_tiles',{state:combatState,tiles:combatTiles},{width,height}),[Math.ceil(width/256),Math.ceil(height/256),1]);b.dispatch(bind('combat_render',{mesh:enemyMesh,bounds:enemyBounds,camera,state:combatState,tiles:combatTiles,hits:monoLight,image},{width,height,samples,exposure}),[width/32,height/2,1]);}
  if(shipMode&&!(profileSkip&8))b.dispatch(bind('ship_render',{mesh:shipMesh,bounds:shipBounds,camera,ship:shipData,image},{width,height,samples,exposure}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
@@ -257,6 +265,7 @@ async function frame(now){
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
    if(((shipMode&&diagnostics.frames===1)||diagnostics.frames%15===0)&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];if(shipMode){diagnostics.shipAltitude=v[44];diagnostics.thrustLimit=v[3];}zoomTail=!shipMode&&Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[53]>0?v[53]:v[52])} ${v[53]>0?'elevation':'deep'} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
    if(diagnostics.frames===1||diagnostics.frames%15===0)updateMetrics();
+   if(combatActive()&&diagnostics.frames%6===0){const data=await runtime.read(combatState,Float32Array,512);combatHUD.update(data);diagnostics.combat={hull:data[4],shield:data[5],target:data[6],hostiles:data[7],rockets:data[10],kills:data[15]};if(data[11]>0&&!combatDead){combatDead=true;gameShell?.defeat();}}
    if(gameShell)await gameShell.tick(now);
   }
   requestAnimationFrame(frame);
@@ -264,9 +273,27 @@ async function frame(now){
 }
 async function exclusive(fn){busy=true;try{await runtime.idle();await ensureKernels(qualityKernels());return await fn();}finally{busy=false;}}
 window.waterLab={
+ async weaponGeometry(){return exclusive(async()=>{const mesh=await runtime.read(shipMesh),parts={};for(const part of [47,79,73,74,95,127,121,122]){const start=6144+part*512,lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];for(let t=start;t<start+512;t++)for(let v=0;v<3;v++)for(let c=0;c<3;c++){const value=mesh[t*24+v*4+c];lo[c]=Math.min(lo[c],value);hi[c]=Math.max(hi[c],value);}parts[part]={lo,hi};}return parts;});},
+ async combatState(){return exclusive(async()=>({data:Array.from(await runtime.read(combatState)),ship:Array.from(await runtime.read(shipData)),fixture:combatFixtureMode,active:combatActive()}));},
+ async combatCost(samples=20){let full,without;try{profileSkip=0;full=await waterLab.benchmark(samples);profileSkip=16;without=await waterLab.benchmark(samples);}finally{profileSkip=0;}return {full,without,scope:'Sequential full-scene GPU timings with and without combat presentation; simulation stays enabled'};},
+ async combatFixture(config={}){return exclusive(async()=>{
+  combatFixtureMode=1;combatDead=false;combatCount=config.enemies?.length??combatCount;combatWeapon=config.weapon??combatWeapon;combatHUD.select(combatWeapon);
+  const ship=await runtime.read(shipData);if(config.clear!==false)runtime.device.queue.writeBuffer(shipData.gpuBuffer,240,new Float32Array([combatWeapon,0,4,0]));if(config.player){ship.set(config.player,56);runtime.device.queue.writeBuffer(shipData.gpuBuffer,224,ship.slice(56,60));}
+  if(config.velocity)runtime.device.queue.writeBuffer(shipData.gpuBuffer,144,new Float32Array([...config.velocity,Math.hypot(...config.velocity)]));
+  // Diagnostic fixture coordinates are expressed in the ship's local axes.
+  const axis=p=>[0,1,2].map(j=>ship[16+j]*p[0]+ship[20+j]*p[1]+ship[24+j]*p[2]);
+  const state=await runtime.read(combatState);if(config.clear!==false){state.fill(0,256*4,608*4);state.fill(0,40,48);}
+  for(let i=0;i<5;i++){const base=(32+i*32)*4,e=config.enemies?.[i];if(!e){if(config.enemies)state[base+3]=0;continue;}state[base+3]=1;state.set([...axis(e.position),0],base+36);state.set([...(e.velocity?axis(e.velocity):[0,0,0]),99],base+32);state.set(e.health||[90,60,20,0],base+56);}
+  runtime.device.queue.writeBuffer(combatState.gpuBuffer,0,state);playing=false;compute(0);await runtime.idle();combatHUD.update(await runtime.read(combatState,Float32Array,512));
+ });},
+ async combatAdvance(frames=1,dt=1/60,input={}){return exclusive(async()=>{
+  combatFiring=!!input.fire;combatWeapon=input.weapon??combatWeapon;combatHUD.select(combatWeapon);playing=true;shipInspect=false;
+  try{for(let i=0;i<Math.min(1200,frames);i++){time+=dt;if(input.simulationOnly){runtime.batch().dispatch(bind('combat_step',{state:combatState,ship:shipData,camera,brush},{deltaTime:dt,firing:combatFiring?1:0,weapon:combatWeapon,enemyCount:combatCount,resetCombat:0,fixture:combatFixtureMode}),[1,1,1]).submit();}else compute(dt);if(i%30===29)await runtime.idle();}await runtime.idle();}
+  finally{playing=false;combatFiring=false;}compute(0);await runtime.idle();const data=await runtime.read(combatState);combatHUD.update(data);return Array.from(data);
+ });},
  sessionState(){return {shell:gameShell?.state,playing,time,clock:weatherClock,playTime,flightProfile,throttle:speed,frames:diagnostics.frames};},
  async shipCost(samples=30){let full,water;try{profileSkip=0;full=await waterLab.benchmark(samples);profileSkip=8;water=await waterLab.benchmark(samples);}finally{profileSkip=0;}return {full,water,scope:'Sequential full-scene measurements with and without the ship render pass; not an isolated per-pass timing'};},
- async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[39],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:126};});},
+ async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[39],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:128};});},
  async shipView(yaw=.34,elevation=.3,distance=22){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([yaw,elevation,distance,1]));shipInspect=true;weatherDirty=true;compute(0);await runtime.idle();const c=await runtime.read(camera,Float32Array,320);diagnostics.altitude=c[1];diagnostics.shipAltitude=c[76];diagnostics.flightSpeed=c[77];updateMetrics();});},
  async shipAltitude(metres){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,4,new Float32Array([metres]));weatherDirty=true;compute(0);await runtime.idle();const state=await runtime.read(shipData);diagnostics.shipAltitude=state[1];diagnostics.flightSpeed=state[39];updateMetrics();});},
  async shipWashState(){return exclusive(async()=>{const data=await runtime.read(brush);return {pointer:Array.from(data.slice(0,4)),domain:Array.from(data.slice(8,12)),shift:Array.from(data.slice(12,16)),engines:[Array.from(data.slice(16,20)),Array.from(data.slice(20,24))]};});},
@@ -386,7 +413,7 @@ window.waterLab={
  async benchmark(samples=40,animate=false){return exclusive(async()=>{if(!runtime.device.features.has('timestamp-query'))return {unsupported:true};playing=animate;const qs=runtime.device.createQuerySet({type:'timestamp',count:2}),resolve=runtime.device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),read=runtime.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const times=[];try{for(let i=0;i<samples+8;i++){if(animate)time+=1/60;compute(animate?1/60:0,{querySet:qs,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1});const enc=runtime.device.createCommandEncoder();enc.resolveQuerySet(qs,0,2,resolve,0);enc.copyBufferToBuffer(resolve,0,read,0,16);runtime.device.queue.submit([enc.finish()]);await read.mapAsync(GPUMapMode.READ);const t=new BigUint64Array(read.getMappedRange());if(i>=8)times.push(Number(t[1]-t[0])/1e6);read.unmap();}times.sort((a,b)=>a-b);return {width,height,samples,animated:animate,medianMs:times[Math.floor(samples/2)],p95Ms:times[Math.floor(samples*.95)],scope:'GPU camera, global weather, sky cache when due, spectrum, FFT, normals, caustics and render; excludes texture copy and browser presentation',adapter:runtime.describe()};}finally{qs.destroy();resolve.destroy();read.destroy();}});}
 };
 function clearGameInput(){
- keys.clear();lookX=lookY=zoomDelta=0;drag=held=forceMoved=flyFallback=lockPending=false;touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();
+ combatFiring=combatMouseFiring=false;combatHUD.stopFire();keys.clear();lookX=lookY=zoomDelta=0;drag=held=forceMoved=flyFallback=lockPending=false;touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();
  for(const el of document.querySelectorAll('[data-move]'))el.classList.remove('active');
  if(document.pointerLockElement===canvas)document.exitPointerLock();flyStatus('');
 }
@@ -408,25 +435,27 @@ function endCraftPreview(restoreColours){
 }
 async function startSession(kind,saved,identity){
  return exclusive(async()=>{
-  playing=false;clearGameInput();flightProfile=kind==='normal'?1:0;speed=saved?.speed??(flightProfile ? .65 : 40);playTime=saved?.playTime??0;
+  playing=false;clearGameInput();combatDead=false;combatFixtureMode=0;combatCount=3;combatHUD.reset();flightProfile=kind==='normal'?1:0;speed=saved?.speed??(flightProfile ? .65 : 40);playTime=saved?.playTime??0;
   time=saved?.time??0;weatherClock=saved?.clock??14*3600;weatherSeason=saved?.season??172;
   for(const [id,value] of Object.entries({depthMode:1,worldSeed:saved?.seed??61,depth:1.4,energy:.8,wind:5,view:0,weatherMode:1,weatherRate:60,season:weatherSeason}))$(id).value=String(value);
   labels();shipInspect=false;$('shipInspect').textContent='Inspect ship · V';$('shipModeLabel').textContent=flightProfile?'NORMAL GAME · ATMOSPHERIC FLIGHT':'FREE ROAM · UNRESTRICTED';
   // Only small state/header buffers are reset. Terrain caches rebuild on demand.
   const enc=runtime.device.createCommandEncoder();
-  for(const buffer of [navigation,shipData,brush,disturbance,seaMemory,motion,...(sandState?[sandState]:[])])enc.clearBuffer(buffer.gpuBuffer);
+  for(const buffer of [navigation,shipData,combatState,brush,disturbance,seaMemory,motion,...(sandState?[sandState]:[])])enc.clearBuffer(buffer.gpuBuffer);
   enc.clearBuffer(camera.gpuBuffer,0,512);enc.clearBuffer(camera.gpuBuffer,nearTerrainOffset*16,128);runtime.device.queue.submit([enc.finish()]);
   geologySeed=-1;geologySize=0;lastDepth=lastWind=lastWeatherMode=-1;weatherMapAt=weatherSkyAt=-Infinity;weatherDirty=true;weatherRefresh=1;visitRain=visitTerrain=false;zoomTail=false;
   reset=saved?0:1;shipAction=saved?0:1;
   if(saved){runtime.device.queue.writeBuffer(navigation.gpuBuffer,0,new Float32Array(saved.navigation));runtime.device.queue.writeBuffer(shipData.gpuBuffer,0,new Float32Array(saved.ship));runtime.device.queue.writeBuffer(camera.gpuBuffer,0,new Float32Array(saved.camera));}
   if(identity)setCraftColours(identity.colours);
-  resize();compute(0);await runtime.idle();menuRedraw=true;gameShell.updateThrottle(speed);
+  resize();compute(0);await runtime.idle();if(flightProfile)combatHUD.update(await runtime.read(combatState,Float32Array,512));menuRedraw=true;gameShell.updateThrottle(speed);
   const c=await runtime.read(camera,Float32Array,256,128);diagnostics.shipAltitude=c[44];diagnostics.flightSpeed=c[1];diagnostics.thrustLimit=c[3];updateMetrics();
  });
 }
 if(shipMode&&fixed===null){
  gameShell=createGameShell({touch:touchDevice,labels,notice:flyStatus,prepareQuality:requestQuality,
   beginCraftPreview,endCraftPreview,setCraftColours,
+  canSave(){return !combatDead;},
+  async recover(){return exclusive(async()=>{clearGameInput();combatDead=false;combatFixtureMode=0;combatHUD.reset();runtime.device.queue.writeBuffer(shipData.gpuBuffer,144,new Float32Array(4));runtime.batch().dispatch(bind('combat_step',{state:combatState,ship:shipData,camera,brush},{deltaTime:0,firing:0,weapon:0,enemyCount:3,resetCombat:2,fixture:0}),[1,1,1]).submit();compute(0);await runtime.idle();menuRedraw=true;});},
   orbitCraft(dx,dy){lookX+=dx*.004;lookY+=dy*.004;menuRedraw=true;weatherDirty=true;},
   pause(){playing=false;clearGameInput();last=0;},
   resume(){clearGameInput();playing=true;last=0;canvas.focus({preventScroll:true});},
@@ -443,19 +472,19 @@ try{
  if(gameShell)flightLoading.begin();
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
- const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','appearance_probe','celestial_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','weather_cloud_filter','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_camera_frame','terrain_cache','terrain_cache_mip','terrain_near_cache','terrain_near_coefficients','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','ship_probe','ship_effect_probe'];
+ const names=['camera_step','brush_pick','force_modes','seed_modes','prepare_modes','spectrum','fft_stage','fft_local','resolve','caustic_clear','caustic_map','caustic_resolve','render','render_pc','render_pc_single','sample_quality_probe','appearance_probe','celestial_probe','surface_coefficients','bed_quality_probe','sand_transport','domain_probe','planet_probe','weather_map','weather_update','weather_probe','weather_sky','weather_visit','weather_cloud_view','weather_cloud_filter','geology_seed','geology_map','geology_update','geology_probe','geology_visit','terrain_probe','terrain_screen_probe','terrain_cache_setup','terrain_camera_frame','terrain_cache','terrain_cache_mip','terrain_near_cache','terrain_near_coefficients','terrain_intersections','geology_mip','terrain_tile_heights','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','ship_probe','ship_effect_probe',...combatKernels];
  const downloaded=gameShell?flightLoading.stage('download',names.length):null;
  kernelArtifacts=new Map(await Promise.all(names.map(async name=>{const response=await fetch(`./kernels/${name}.json?v=${encodeURIComponent(assetVersion)}`);if(!response.ok)throw Error(`Could not download ${name} (HTTP ${response.status}). Check your connection and retry.`);const artifact=await response.json();downloaded?.();return [name,artifact];})));
  for(const name of names)kernels[name]={loaded:false,clear(){}};
- const optional=new Set(['ship_probe','ship_effect_probe','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','appearance_probe','celestial_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
+ const optional=new Set([...combatKernels,'ship_probe','ship_effect_probe','ship_step','ship_wash_pick','ship_wash_modes','ship_mesh','ship_bounds','ship_render','render','render_pc','render_pc_single','surface_coefficients','sand_transport','fft_stage','sample_quality_probe','appearance_probe','celestial_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe']);
  $('loadText').textContent=shipMode?'Preparing the spacecraft and planet…':'Preparing the globe and water…';
  await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()],true);
  // Settings remain usable during startup; honor the latest profile before dispatch.
  while(qualityKernels().some(name=>!kernels[name]?.loaded))await ensureKernels(qualityKernels(),true);
  if(failed)throw Error('Graphics preparation stopped. Reload to try again.');
  if(gameShell)flightLoading.stage('world');
- motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((nearTerrainOffset+8+nearTerrainWidth*nearTerrainWidth*2)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?192:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
- if(shipMode){shipMesh=runtime.createBuffer(71680*6*16);shipBounds=runtime.createBuffer((255+128*85+1024)*2*16);shipData=runtime.createBuffer(64*16);const b=runtime.batch();b.dispatch(bind('ship_mesh',{mesh:shipMesh,bounds:shipBounds}),[1120,1,1]);for(let level=0;level<=12;level++){const count=level===0?8960:level<5?128*(level===1?64:level===2?16:level===3?4:1):128>>(level-5);b.dispatch(bind('ship_bounds',{mesh:shipMesh,bounds:shipBounds},{level}),[Math.ceil(count/64),1,1]);}b.submit();diagnostics.shipTriangles=71680;}
+ motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((nearTerrainOffset+8+nearTerrainWidth*nearTerrainWidth*2)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?288:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
+ if(shipMode){shipMesh=runtime.createBuffer(71680*6*16);enemyMesh=runtime.createBuffer(71680*6*16);shipBounds=runtime.createBuffer((255+128*85+1024)*2*16);enemyBounds=runtime.createBuffer((255+128*85+1024)*2*16);shipData=runtime.createBuffer(64*16);combatState=runtime.createBuffer(1536*16);const b=runtime.batch();for(const [name,mesh,bounds] of [['ship_mesh',shipMesh,shipBounds],['ship_enemy_mesh',enemyMesh,enemyBounds]]){b.dispatch(bind(name,{mesh,bounds}),[1120,1,1]);for(let level=0;level<=12;level++){const count=level===0?8960:level<5?128*(level===1?64:level===2?16:level===3?4:1):128>>(level-5);b.dispatch(bind('ship_bounds',{mesh,bounds},{level}),[Math.ceil(count/64),1,1]);}}b.submit();diagnostics.shipTriangles=71680;diagnostics.enemyMeshCopies=1;}
  if(gameShell){resize();compute(0);await runtime.idle();runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([-.18,1.12,42,1]));weatherDirty=true;}
  requestAnimationFrame(frame);
 }catch(e){fail(e);}

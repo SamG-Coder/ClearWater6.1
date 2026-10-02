@@ -9,6 +9,7 @@ const descriptions={
  frame:['Rendering the first view','Waiting for the GPU to finish the scene. Flight controls unlock when it is ready.']
 };
 function system(name){
+ if(name.startsWith('combat_'))return 'Weapons & hostile craft';
  if(name.startsWith('ship_'))return 'Spacecraft';
  if(name.startsWith('render'))return 'Ocean lighting';
  if(name.startsWith('terrain_')||name.startsWith('geology_'))return 'Planet & terrain';

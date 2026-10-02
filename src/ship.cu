@@ -1,11 +1,18 @@
 // Original ClearWater spacecraft. Geometry, navigation, ray traversal and
 // materials are CUDA; the browser only dispatches kernels and forwards input.
-// 126 manufactured components; the hull and canopy get denser curved meshes.
+// 128 manufactured components, including paired weapon mounts. The hull and
+// chamfered canopy receive the densest meshes.
 // Static geometry and a
 // two-level BVH are built once, then shared by primary and sunlight rays.
 __device__ int ship_tri_base(int part){return part<4?part*2048:6144+part*512;}
 __device__ int ship_node_base(int part){return 255+(part<4?part*341:1024+part*85);}
 struct ShipPart { float3 centre; float3 size; float3 rotation; int shape; int material; int mirror; };
+// One source of truth for modeled apertures and projectile/beam origins.
+__device__ float3 ship_weapon_mount(int weapon,int side,int tube){
+ float s=(float)side;if(weapon==1)return vec(s*1.85f,.12f,-3.24f);
+ if(weapon==2)return vec(s*(tube==0?6.02f:6.38f),-.20f,-1.02f);
+ return vec(s*2.75f,.14f,-5.24f);
+}
 __device__ float3 ship_rotate(float3 p,float3 r){
  float a=cosf(r.x),b=sinf(r.x);p=vec(p.x,p.y*a-p.z*b,p.y*b+p.z*a);
  a=cosf(r.y);b=sinf(r.y);p=vec(p.x*a+p.z*b,p.y,-p.x*b+p.z*a);
@@ -14,34 +21,40 @@ __device__ float3 ship_rotate(float3 p,float3 r){
 __device__ ShipPart ship_component(int id){
  ShipPart p;p.centre=vec(0,0,0);p.size=vec(1,1,1);p.rotation=vec(0,0,0);p.shape=4;p.material=0;p.mirror=1;
  if(id<32){
-  if(id==0){p.shape=0;p.size=vec(1.65f,.72f,6.0f);p.centre.z=-.5f;}
+  if(id==0){p.shape=12;p.size=vec(1.65f,.72f,5.825f);p.centre.z=-.325f;}
   if(id==1){p.shape=0;p.size=vec(1.28f,.40f,5.35f);p.centre=vec(0,-.61f,0);p.material=2;}
-  if(id==2){p.shape=5;p.size=vec(.98f,.69f,2.3f);p.centre=vec(0,.89f,-1.95f);p.material=3;}
-  if(id==3){p.shape=5;p.size=vec(.032f,.71f,2.35f);p.centre=vec(0,.89f,-1.95f);p.material=2;}
+  if(id==2){p.shape=5;p.size=vec(.98f,.58f,2.3f);p.centre=vec(0,.86f,-1.95f);p.material=3;}
+  if(id==3){p.shape=5;p.size=vec(.025f,.603f,2.32f);p.centre=vec(0,.86f,-1.95f);p.material=2;}
   if(id==4){p.size=vec(.48f,.27f,.08f);p.centre=vec(0,1.03f,-1.10f);p.rotation.x=.20f;p.material=9;}
   if(id==5){p.size=vec(.62f,.14f,.23f);p.centre=vec(0,.80f,-2.92f);p.rotation.x=-.28f;p.material=9;}
-  if(id==6){p.shape=10;p.size=vec(.996f,.712f,2.30f);p.centre=vec(0,.89f,-1.95f);p.material=2;}
-  if(id==7){p.shape=0;p.size=vec(.50f,.30f,1.48f);p.centre=vec(0,-.01f,-5.6f);p.material=1;}
+  if(id==6){p.shape=10;p.size=vec(.998f,.60f,2.30f);p.centre=vec(0,.86f,-1.95f);p.material=2;}
+  // A recessed sensor fascia sits inside the blunt armoured nose.
+  if(id==7){p.size=vec(.47f,.145f,.045f);p.centre=vec(0,-.035f,-6.068f);p.material=2;}
   if(id==8){p.size=vec(.58f,.31f,1.88f);p.centre=vec(0,.82f,2.3f);p.material=0;}
   if(id==9){p.size=vec(.46f,.065f,.7f);p.centre=vec(0,1.17f,2.05f);p.material=2;}
   if(id==10){p.shape=1;p.size=vec(.6f,.10f,1.55f);p.centre=vec(0,.94f,3.2f);p.rotation.z=1.5707963f;p.material=2;}
   if(id==11){p.shape=3;p.size=vec(.55f,.10f,.75f);p.centre=vec(0,-.14f,5.90f);p.material=4;}
   if(id==12||id==13){p.size=vec(.28f,.05f,1.28f);p.centre=vec(id==12?-.97f:.97f,.7f,2.4f);p.material=5;}
-  if(id==14||id==15){p.size=vec(.12f,.16f,2.10f);p.centre=vec(id==14?-1.34f:1.34f,.16f,.55f);p.material=1;}
+  // Load-bearing shoulders bridge the laser receivers into the main hull.
+  if(id==14||id==15){p.size=vec(.60f,.26f,.72f);p.centre=vec(id==14?-1.53f:1.53f,.17f,-1.42f);p.material=0;}
   if(id==16){p.shape=2;p.size=vec(.49f,.49f,1.1f);p.centre=vec(0,-.14f,5.25f);p.material=2;}
   if(id==17){p.shape=3;p.size=vec(.40f,.05f,.7f);p.centre=vec(0,-.14f,5.98f);p.material=6;}
   if(id==18){p.shape=4;p.size=vec(.30f,.27f,.015f);p.centre=vec(0,-.14f,5.85f);p.material=6;}
-  if(id==19){p.size=vec(.17f,.08f,.10f);p.centre=vec(0,.28f,-5.6f);p.material=10;}
-  if(id>=20&&id<24){float s=(id%2)==0?-1:1;p.size=vec(.045f,.05f,.72f);p.centre=vec(s*.89f,.78f,-1.2f-(float)(id/2-10)*1.22f);p.material=2;}
+  if(id==19){p.size=vec(.105f,.035f,.008f);p.centre=vec(0,-.015f,-6.116f);p.material=11;}
+  // A continuous coaming overlaps the hull below and the glass seating above.
+  // The dark gasket is geometry, not a line painted over an empty gap.
+  if(id==20){p.shape=13;p.size=vec(1.11f,.24f,2.70f);p.centre=vec(0,.53f,-1.95f);p.material=0;}
+  if(id==21){p.shape=13;p.size=vec(1.025f,.04f,2.32f);p.centre=vec(0,.746f,-1.95f);p.material=2;}
+  if(id==22||id==23){p.size=vec(.08f,.12f,1.65f);p.centre=vec(id==22?-.95f:.95f,.66f,-1.25f);p.material=0;}
   if(id>=24&&id<28){float s=(id%2)==0?-1:1;p.size=vec(.42f,.035f,.47f);p.centre=vec(s*.88f,.70f,-.05f+(float)(id/2-12)*1.22f);p.material=id<26?0:1;}
   if(id==28||id==29){p.size=vec(.095f,.045f,1.5f);p.centre=vec(id==28?-.70f:.70f,.22f,-3.7f);p.rotation.z=id==28?-.1f:.1f;p.material=10;}
-  if(id==30){p.size=vec(.38f,.035f,.52f);p.centre=vec(0,.42f,-4.25f);p.rotation.x=-.20f;p.material=0;}
-  if(id==31){p.size=vec(.10f,.055f,.37f);p.centre=vec(0,.49f,-4.26f);p.rotation.x=-.20f;p.material=1;}
+  if(id==30){p.size=vec(.45f,.10f,.58f);p.centre=vec(0,.45f,-4.85f);p.rotation.x=-.25f;p.material=0;}
+  if(id==31){p.size=vec(.10f,.03f,.32f);p.centre=vec(0,.56f,-4.80f);p.rotation.x=-.25f;p.material=1;}
  }else{
   int side=id<80?-1:1,k=(id-32)%48;float s=1;p.mirror=side;
   if(k==0){p.shape=1;p.size=vec(s*5.7f,.26f,3.15f);p.centre=vec(s*1.0f,-.13f,.7f);}
-  // Retired winglet slots keep component IDs and the binary BVH layout stable.
-  if(k==1){p.size=vec(0,0,0);p.material=-1;}
+  // Reuse former wing/decorative slots for hardware, without increasing the BVH.
+  if(k==1){p.size=vec(.34f,.25f,1.08f);p.centre=plus(ship_weapon_mount(0,1,0),vec(0,0,3.52f));p.material=0;}
   if(k==2){p.shape=2;p.size=vec(1.0f,1.0f,2.65f);p.centre=vec(s*4.65f,.22f,2.25f);p.material=2;}
   if(k==3){p.shape=2;p.size=vec(1.13f,1.13f,1.40f);p.centre=vec(s*4.65f,.22f,.72f);p.material=0;}
   if(k==4){p.shape=3;p.size=vec(.87f,.17f,.75f);p.centre=vec(s*4.65f,.22f,-.72f);p.material=2;}
@@ -54,16 +67,18 @@ __device__ ShipPart ship_component(int id){
   if(k==11){p.shape=1;p.size=vec(2.25f,.12f,1.20f);p.centre=vec(s*5.25f,.9f,2.35f);p.rotation.z=s*1.05f;p.material=0;}
   if(k==12){p.size=vec(.16f,.13f,1.08f);p.centre=vec(s*6.62f,.01f,2.15f);p.material=2;}
   if(k==13){p.size=vec(.16f,.065f,.15f);p.centre=vec(s*6.68f,.15f,1.35f);p.material=side<0?7:8;}
-  if(k==14){p.shape=2;p.size=vec(.30f,.30f,.75f);p.centre=vec(s*2.12f,-.37f,2.15f);p.rotation.y=1.5707963f;p.material=4;}
-  if(k==15){p.shape=2;p.size=vec(.065f,.065f,1.25f);p.centre=vec(s*2.8f,-.5f,2.20f);p.rotation.y=s*1.08f;p.material=4;}
+  if(k==14){p.shape=2;p.size=vec(.21f,.21f,.55f);p.centre=plus(ship_weapon_mount(0,1,0),vec(0,0,2.48f));p.material=2;}
+  if(k==15){p.shape=2;p.size=vec(.11f,.11f,1.20f);p.centre=plus(ship_weapon_mount(0,1,0),vec(0,0,1.24f));p.material=4;}
   if(k>=16&&k<24){float a=(float)(k-16)*.78539816f;p.size=vec(.25f,.085f,.61f);p.centre=vec(s*4.65f+sinf(a)*.89f,.22f+cosf(a)*.89f,4.30f);p.rotation.z=-a;p.rotation.x=.09f;p.material=4;}
   if(k>=24&&k<32){float a=(float)(k-24)*.78539816f;p.size=vec(.07f,.38f,.045f);p.centre=vec(s*4.65f+sinf(a)*.46f,.22f+cosf(a)*.46f,-.77f);p.rotation.z=-a;p.rotation.y=.4f;p.material=4;}
   if(k>=32&&k<40){p.shape=3;p.size=vec(.94f,.032f,1);p.centre=vec(s*4.65f,.22f,2.05f+(float)(k-32)*.20f);p.material=k%3==0?1:4;}
-  if(k>=40&&k<44){p.size=vec(.38f,.046f,.32f);p.centre=vec(s*(2.35f+(float)(k-40)*.64f),.14f,1.45f+(float)(k-40)*.12f);p.material=k==40?1:0;}
-  if(k==44){p.size=vec(.15f,.25f,1.10f);p.centre=vec(s*1.86f,-.68f,1.27f);p.material=2;}
-  if(k==45){p.shape=2;p.size=vec(.035f,.035f,.54f);p.centre=vec(s*6.62f,.15f,1.35f);p.material=4;}
-  if(k==46){p.shape=2;p.size=vec(.062f,.062f,1.80f);p.centre=vec(s*5.36f,.85f,2.20f);p.material=1;}
-  if(k==47){p.shape=3;p.size=vec(1.00f,.06f,1);p.centre=vec(s*4.65f,.22f,1.72f);p.material=1;}
+  if(k==40){p.size=vec(.42f,.32f,1.28f);p.centre=vec(6.2f,-.20f,.62f);p.material=0;}
+  if(k==41||k==42){p.shape=2;p.size=vec(.14f,.14f,.30f);p.centre=plus(ship_weapon_mount(2,1,k-41),vec(0,0,.34f));p.material=2;}
+  if(k==43){p.size=vec(.45f,.045f,.70f);p.centre=vec(6.2f,.16f,.35f);p.material=2;}
+  if(k==44){p.size=vec(.45f,.28f,.70f);p.centre=vec(2.75f,-.08f,-1.03f);p.material=2;}
+  if(k==45){p.shape=3;p.size=vec(.14f,.038f,1);p.centre=plus(ship_weapon_mount(0,1,0),vec(0,0,.09f));p.material=2;}
+  if(k==46){p.size=vec(.27f,.24f,.84f);p.centre=plus(ship_weapon_mount(1,1,0),vec(0,0,.90f));p.material=2;}
+  if(k==47){p.size=vec(.16f,.16f,.025f);p.centre=plus(ship_weapon_mount(1,1,0),vec(0,0,.045f));p.material=11;}
  }
  return p;
 }
@@ -75,19 +90,45 @@ __device__ float2 ship_octagon(float u){
 }
 __device__ float3 ship_vertex(ShipPart p,float u,float v){
  float a=u*6.2831853f,cap=fminf(1,fmaxf(0,fminf(v,1-v)*32));float2 q=ship_octagon(u);float3 point=vec(q.x*cap,q.y*cap,2*v-1);
- if(p.shape==0){
+ if(p.shape==0||p.shape==12){
   float ca=cosf(a),sa=sinf(a),qx=(ca<0?-1:1)*positive_power(fabsf(ca),.68f),qy=(sa<0?-1:1)*positive_power(fabsf(sa),.78f);
   float w=(.045f+.955f*eased(0,.43f,v))*(1-.28f*eased(.65f,1,v)),h=.20f+.80f*eased(.02f,.45f,v);float end=fminf(1,fmaxf(0,fminf(v,1-v)*64));
   point=vec(qx*w*end,qy*h*end+.06f*sinf(v*3.14159265f),2*v-1);
+  if(p.shape==12){
+   // Broad chisel section flows into the fuselage; the first ring forms a
+   // recessed front face instead of stretching the armour to a pointed tip.
+   float t=clamp01((v-.03125f)/.96875f),rounded=eased(.48f,.75f,t),front=clamp01(v*32);
+   qx=mixf(q.x,qx,rounded);qy=mixf(q.y,qy,rounded);
+   w=mixf(.38f,1,eased(0,.43f,t))*(1-.28f*eased(.65f,1,t));h=mixf(.44f,1,eased(0,.45f,t));
+   point=vec(qx*w*front*end,qy*h*front*end+.06f*sinf(t*3.14159265f),2*t-1+.035f*(1-front));
+  }
  }
  if(p.shape==1){float w=mixf(1,.36f,v);point=vec(v,q.y*mixf(1,.38f,v)*cap,q.x*w*cap+.48f*v);}
  if(p.shape==2){float radius=.82f+.18f*sinf(v*3.14159265f);point=vec(cosf(a)*radius,sinf(a)*radius,2*v-1);}
  if(p.shape==3){float t=v*6.2831853f;point=vec(cosf(a)*(p.size.x+p.size.y*cosf(t)),sinf(a)*(p.size.x+p.size.y*cosf(t)),sinf(t)*p.size.y*p.size.z);point=plus(p.centre,ship_rotate(point,p.rotation));point.x*=(float)p.mirror;return point;}
- if(p.shape==5||p.shape==10){float t=p.shape==10?.62f+(v-.5f)*.016f:v;float profile=positive_power(fmaxf(0,sinf(t*3.14159265f)),.62f);point=vec(cosf(a)*profile,sinf(a)*profile,2*t-1);}
+ if(p.shape==5||p.shape==10){
+  // Planar windscreen, low roof and chamfered shoulders replace the bubble.
+  // Breaks align with longitudinal vertices, keeping facet normals deliberate.
+  float t=p.shape==10?.25f+(v-.5f)*.014f:v;
+  float front=clamp01(t*4),rear=clamp01((t-.75f)*4),w=mixf(.60f,1,front)*(1-.30f*rear),h=mixf(.08f,1,front)*(1-.87f*rear),end=fminf(1,fmaxf(0,fminf(t,1-t)*64));
+  point=vec(q.x*w*(1-.24f*fmaxf(0,q.y))*end,(fmaxf(0,q.y)*h+fminf(0,q.y)*.10f)*end-.20f,2*t-1);
+ }
+ if(p.shape==13){
+  float front=clamp01(v*4),rear=clamp01((v-.75f)*4),w=mixf(.60f,1,front)*(1-.30f*rear);
+  // A broad flat seating face supports the canopy's complete lower perimeter.
+  // Taper the end caps down into the hull, rather than leaving a raised point.
+  float qx=fabsf(q.x),qy=fabsf(q.y);qx=qx<=.55f?qx*(.90f/.55f):.90f+(qx-.55f)*(.10f/.45f);qy=qy<=.55f?qy*(.90f/.55f):.90f+(qy-.55f)*(.10f/.45f);
+  point=vec((q.x<0?-qx:qx)*w*cap,(q.y<0?-qy:qy)*cap-(1-cap),2*v-1);
+ }
  point=vec(point.x*p.size.x,point.y*p.size.y,point.z*p.size.z);point=plus(p.centre,ship_rotate(point,p.rotation));point.x*=(float)p.mirror;return point;
 }
-__global__ void ship_mesh(float4 *mesh,float4 *bounds){
- int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=71680)return;int part=i<8192?i/2048:4+(i-8192)/512,local=i-ship_tri_base(part),leaf=local/8,triangle=i%8;ShipPart p=ship_component(part);
+__device__ void ship_mesh_triangle(float4 *mesh,float4 *bounds,int i,int enemy){
+ if(i>=71680)return;int part=i<8192?i/2048:4+(i-8192)/512,local=i-ship_tri_base(part),leaf=local/8,triangle=i%8;ShipPart p=ship_component(part);
+ if(enemy!=0){
+  if(part==0){p.size.z*=1.10f;p.size.y*=.88f;}
+  if(part==7||part==19)p.centre.z-=.5825f;
+  if(part>=32){int k=(part-32)%48;if(k==0){p.size.z*=.82f;p.rotation.y=-.10f;}if(k==11){p.size.x*=.86f;p.size.z*=1.42f;p.rotation.z=1.24f;p.material=1;}}
+ }
  int axis=part<4?16:8,nu=part<4?32:((p.shape==2||p.shape==3||p.shape==10)?32:16),nv=(part<4?1024:256)/nu,du=nu/axis,dv=nv/axis,quad=triangle/2;
  int ix=(leaf%axis)*du+quad%du,iy=(leaf/axis)*dv+quad/du;
  float u=(float)ix/(float)nu,v=(float)iy/(float)nv;int flip=triangle%2;
@@ -102,6 +143,8 @@ __global__ void ship_mesh(float4 *mesh,float4 *bounds){
  }
  if(local==0){int node=ship_node_base(part);bounds[node*2].w=(float)p.material;}
 }
+__global__ void ship_mesh(float4 *mesh,float4 *bounds){ship_mesh_triangle(mesh,bounds,blockIdx.x*blockDim.x+threadIdx.x,0);}
+__global__ void ship_enemy_mesh(float4 *mesh,float4 *bounds){ship_mesh_triangle(mesh,bounds,blockIdx.x*blockDim.x+threadIdx.x,1);}
 __device__ float3 ship_min(float3 a,float3 b){return vec(fminf(a.x,b.x),fminf(a.y,b.y),fminf(a.z,b.z));}
 __device__ float3 ship_max(float3 a,float3 b){return vec(fmaxf(a.x,b.x),fmaxf(a.y,b.y),fmaxf(a.z,b.z));}
 __device__ float3 ship_xyz(float4 a){return vec(a.x,a.y,a.z);}
@@ -178,7 +221,7 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  ship_prepare_colours(ship);
  if(ship[0].w==0||action==1){
   if(camera[8].z==0){float navLength=navigationState[0].x*navigationState[0].x+navigationState[1].x*navigationState[1].x+navigationState[2].x*navigationState[2].x;camera_advance(camera,navigationState,0,0,0,0,0,0,1,0,navLength>.5f?0:1,depth);}
-  ship[0]=make_float4(camera[0].x,22,camera[0].z,1);ship[1]=make_float4(0,0,0,0);ship[2]=make_float4(.34f,.30f,22,0);ship[3]=make_float4(0,.16f,0,speed);
+  ship[0]=make_float4(camera[0].x,22,camera[0].z,1);ship[1]=make_float4(0,0,0,0);ship[2]=make_float4(flightProfile!=0?0:.34f,.30f,22,0);ship[3]=make_float4(0,.16f,0,speed);
   ship[8]=make_float4(0,0,0,0);ship[9]=make_float4(0,0,0,0);ship[10]=make_float4(0,0,22,0);
  }
  // Navigation belongs to the ship; rendering belongs to the chase eye. Restore
@@ -222,6 +265,7 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
   if(dt>0){previous=scale(previous,fminf(1,maxSpeed/fmaxf(.001f,sqrtf(dotv(previous,previous)))));pose.w=fminf(pose.w,maxSpeed);}
  }
  float3 velocity=blend(previous,desired,1-expf(-dt*(forward<0?10:6))),travel=scale(plus(previous,velocity),.5f);
+ float3 worldTravel=to_world(camera,scale(travel,dt));
  float actual=sqrtf(dotv(travel,travel)),factor=fmaxf(1,ship[0].y*.06f);
  camera[0]=make_float4(ship[0].x,ship[0].y,ship[0].z,0);camera[1]=make_float4(0,0,0,0);
  if(freeFlight>0&&actual>0&&dt>0){
@@ -270,6 +314,7 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  ship[4]=make_float4(sr.x,sr.y,sr.z,0);ship[5]=make_float4(su.x,su.y,su.z,0);ship[6]=make_float4(sb.x,sb.y,sb.z,0);
  eye.y=(float)(eyeRadius-6371000.0);
  camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[1]=make_float4(pose.x,pose.y,0,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=ship[9].w;
+ float3 combatTravel=ship_local(camera,worldTravel);ship[17]=make_float4(combatTravel.x,combatTravel.y,combatTravel.z,0);
  camera[19].x=ship[0].y;camera[19].y=ship[9].w;camera[19].z=1;camera[8].w=maxSpeed;
 }
 // Two vectored lift jets create pressure at their actual sea-plane footprints.
@@ -376,6 +421,11 @@ __device__ float3 ship_local_light(float3 p,float3 n,float3 view,float3 albedo,c
   float attenuation=power/(1+d2)*eased(144,81,d2);
   radiance=plus(radiance,scale(vec(hue.x*(albedo.x*diffuse+spec),hue.y*(albedo.y*diffuse+spec),hue.z*(albedo.z*diffuse+spec)),attenuation));
  }
+ for(int i=0;i<2;i++){
+  float flash=i==0?ship[20].x:ship[20].y;if(flash<=0)continue;float3 delta=minus(ship_weapon_mount((int)ship[20].z,i==0?-1:1,0),p);float d2=dotv(delta,delta);if(d2>36)continue;
+  float3 l=unit(delta),h=unit(plus(l,view)),hue=ship[20].z==1?vec(.08f,.65f,1):vec(1,.48f,.09f);float diffuse=fmaxf(0,dotv(n,l)),spec=positive_power(fmaxf(0,dotv(n,h)),32);
+  radiance=plus(radiance,scale(vec(hue.x*(albedo.x*diffuse+spec),hue.y*(albedo.y*diffuse+spec),hue.z*(albedo.z*diffuse+spec)),flash*2/(1+d2)));
+ }
  return radiance;
 }
 __global__ void ship_effect_probe(const float4 *camera,const float4 *ship,const float4 *brush,const float4 *points,float4 *output,int count){
@@ -399,6 +449,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  if(mat==8){color=vec(.08f,1,.50f);emission=3;}
  if(mat==9){color=vec(.014f,.025f,.028f);rough=.65f;metal=.1f;if(hit.part==5&&n.y>.2f){color=vec(.015f,.17f,.22f);emission=1;}}
  if(mat==10){color=vec(.55f,.78f,1);emission=.1f+4*(1-eased(-.04f,.18f,camera[9].y));rough=.18f;}
+ if(mat==11){color=ship[16].w==2?vec(1,.045f,.015f):vec(.035f,.54f,1);emission=1.8f;rough=.12f;metal=.5f;}
  // Metre-scale panel seams, recessed fasteners, warning chevrons and paint
  // wear are filtered by the projected pixel footprint, not repeating noise.
  float fp=fmaxf(.002f,footprint),seam=0,rivet=0;
@@ -438,6 +489,8 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  float ao=1-.24f*seam-.32f*rivet;if(hit.part>=32&&fabsf(p.x)>3.65f&&fabsf(p.x)<5.7f&&p.y<1.1f)ao*=.82f;
  float3 result=plus(scale(plus(direct,plus(indirect,reflection)),ao),scale(color,emission));
  result=plus(result,ship_local_light(p,n,view,color,camera,ship));
+ // A short impact pulse follows the actual shield/hull damage timer.
+ if(ship[14].w>0){float rim=positive_power(1-fmaxf(0,dotv(n,view)),2);float3 flash=ship[14].y>0?vec(.08f,.70f,2.2f):vec(2,.20f,.025f);result=plus(result,scale(flash,ship[14].w*(.12f+rim)));}
  if(mat==3){
   ShipHit interior=ship_trace(mesh,bounds,plus(p,scale(ray,.009f)),ray,2);
   float3 inside=vec(.008f,.015f,.019f);
