@@ -158,7 +158,15 @@ __device__ void ship_space_advance(float4 *camera,float2 *navigationState,float3
 }
 __device__ float3 ship_local(const float4 *camera,float3 p){return vec(dotv(p,ship_xyz(camera[5])),dotv(p,ship_xyz(camera[6])),dotv(p,ship_xyz(camera[7])));}
 __device__ float3 ship_heading(float yaw,float pitch){return vec(sinf(yaw)*cosf(pitch),sinf(pitch),-cosf(yaw)*cosf(pitch));}
-__global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,float deltaTime,float forward,float turn,float rise,float lookX,float lookY,float speed,int boost,int action,int inspect,float depth,float aspect){
+// A bounded game envelope, independent of the unrestricted exploration scale.
+// Smooth stages leave room to enjoy the ocean, then cross planetary distances.
+__device__ float ship_game_limit(float altitude,int boost){
+ float low=eased(1500,12000,altitude),upper=eased(12000,80000,altitude),space=eased(80000,600000,altitude);
+ float cruise=mixf(180,420,low);cruise=mixf(cruise,1200,upper);cruise=mixf(cruise,150000,space);
+ float boosted=mixf(450,1050,low);boosted=mixf(boosted,3000,upper);boosted=mixf(boosted,600000,space);
+ return boost!=0?boosted:cruise;
+}
+__global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,float deltaTime,float forward,float turn,float rise,float lookX,float lookY,float speed,int boost,int action,int inspect,int flightProfile,float depth,float aspect){
  float dt=fminf(.1f,fmaxf(0,deltaTime));
  if(ship[0].w==0||action==1){
   if(camera[8].z==0){float navLength=navigationState[0].x*navigationState[0].x+navigationState[1].x*navigationState[1].x+navigationState[2].x*navigationState[2].x;camera_advance(camera,navigationState,0,0,0,0,0,0,1,0,navLength>.5f?0:1,depth);}
@@ -194,11 +202,17 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  }
  float targetBank=inspect==0?fminf(.62f,fmaxf(-.62f,-ship[8].z*.48f)):0;pose.z=mixf(pose.z,targetBank,1-expf(-dt*7));
  float freeFlight=eased(12000,80000,ship[0].y);
- float maxSpeed=fminf(30000000,speed*fmaxf(1,ship[0].y*.006f)*(boost!=0?6:1)),target=fmaxf(0,forward)*maxSpeed;
+ float maxSpeed=flightProfile!=0?ship_game_limit(ship[0].y,boost)*fminf(1,fmaxf(.1f,speed)):fminf(30000000,speed*fmaxf(1,ship[0].y*.006f)*(boost!=0?6:1)),target=fmaxf(0,forward)*maxSpeed;
  pose.w=mixf(pose.w,target,1-expf(-dt*(forward<0?7:forward>0?2.8f:.48f*(1-freeFlight))));if(pose.w<.002f)pose.w=0;
  float3 nose=vec(sinf(pose.x)*cosf(pose.y),sinf(pose.y),-cosf(pose.x)*cosf(pose.y));
  float3 lift=blend(vec(0,1,0),vec(-sinf(pose.x)*sinf(pose.y),cosf(pose.y),cosf(pose.x)*sinf(pose.y)),freeFlight);
  float3 previous=ship_xyz(ship[9]),desired=plus(scale(nose,pose.w),scale(lift,rise*maxSpeed*.35f));
+ if(flightProfile!=0){
+  // Clamp the complete vector: diagonal thrust and a fast atmospheric re-entry
+  // must respect the same envelope as straight flight. Zero-dt pause is inert.
+  desired=scale(desired,fminf(1,maxSpeed/fmaxf(.001f,sqrtf(dotv(desired,desired)))));
+  if(dt>0){previous=scale(previous,fminf(1,maxSpeed/fmaxf(.001f,sqrtf(dotv(previous,previous)))));pose.w=fminf(pose.w,maxSpeed);}
+ }
  float3 velocity=blend(previous,desired,1-expf(-dt*(forward<0?10:6))),travel=scale(plus(previous,velocity),.5f);
  float actual=sqrtf(dotv(travel,travel)),factor=fmaxf(1,ship[0].y*.06f);
  camera[0]=make_float4(ship[0].x,ship[0].y,ship[0].z,0);camera[1]=make_float4(0,0,0,0);
@@ -213,6 +227,7 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  }else camera_advance(camera,navigationState,dt,actual>0?-travel.z/actual:0,actual>0?travel.x/actual:0,actual>0?travel.y/actual:0,0,0,actual/factor,0,0,depth);
  float floorHeight=camera[21].w!=0?terrain_height(camera,ship_xyz(camera[6])):0;camera[0].y=fmaxf(camera[0].y,fmaxf(6,floorHeight+6));
  if(camera[0].y<=fmaxf(6,floorHeight+6)+.001f)velocity.y=fmaxf(0,velocity.y);
+ if(flightProfile!=0&&dt>0){float cap=ship_game_limit(camera[0].y,boost)*fminf(1,fmaxf(.1f,speed));velocity=scale(velocity,fminf(1,cap/fmaxf(.001f,sqrtf(dotv(velocity,velocity)))));pose.w=fminf(pose.w,cap);}
  ship[9]=make_float4(velocity.x,velocity.y,velocity.z,sqrtf(dotv(velocity,velocity)));
  ship[0]=make_float4(camera[0].x,camera[0].y,camera[0].z,1);ship[1]=pose;ship[3]=make_float4(ship[3].x+dt,mixf(ship[3].y,forward>0?(boost!=0?1:.62f):fabsf(rise)>.01f?.38f:.16f,1-expf(-dt*5)),camera[0].y-floorHeight,speed);
  float3 angles=vec(pose.y,-pose.x,pose.z),right=ship_rotate(vec(1,0,0),angles),up=ship_rotate(vec(0,1,0),angles),back=ship_rotate(vec(0,0,1),angles);
@@ -224,7 +239,7 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  ship[10].x=ship_angle(ship[10].x+ship_angle(pose.x-ship[10].x)*(1-expf(-dt*8)));ship[10].y=mixf(ship[10].y,pose.y,1-expf(-dt*8));
  float cameraYaw=inspect!=0?pose.x:pose.x+fminf(.24f,fmaxf(-.24f,ship_angle(ship[10].x-pose.x))),cameraPitch=inspect!=0?pose.y:mixf(pose.y,ship[10].y,.65f);
  float3 cameraRight=vec(cosf(cameraYaw),0,sinf(cameraYaw)),cameraBack=vec(-sinf(cameraYaw)*cosf(cameraPitch),-sinf(cameraPitch),cosf(cameraYaw)*cosf(cameraPitch)),cameraUp=unit(crossv(cameraBack,cameraRight));
- float extra=inspect!=0?0:.08f*clamp01(ship[9].w/fmaxf(1,speed))+.07f*eased(.62f,1,ship[3].y);
+ float extra=inspect!=0?0:.08f*clamp01(ship[9].w/fmaxf(1,flightProfile!=0?maxSpeed:speed))+.07f*eased(.62f,1,ship[3].y);
  float wantedDistance=ship[2].z*(1+extra);ship[10].z=dt>0?mixf(ship[10].z,wantedDistance,1-expf(-dt*5)):wantedDistance;
  float orbit=ship[2].x,elevation=ship[2].y,distance=ship[10].z*fmaxf(1,.88f/aspect);float3 offset=plus(scale(cameraRight,sinf(orbit)*cosf(elevation)*distance),plus(scale(cameraUp,sinf(elevation)*distance),scale(cameraBack,cosf(orbit)*cosf(elevation)*distance)));
  // Keep the model-to-eye transform in small local metres. Subtracting two
@@ -247,7 +262,7 @@ __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,fl
  ship[4]=make_float4(sr.x,sr.y,sr.z,0);ship[5]=make_float4(su.x,su.y,su.z,0);ship[6]=make_float4(sb.x,sb.y,sb.z,0);
  eye.y=(float)(eyeRadius-6371000.0);
  camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[1]=make_float4(pose.x,pose.y,0,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=ship[9].w;
- camera[19].x=ship[0].y;camera[19].y=ship[9].w;camera[19].z=1;
+ camera[19].x=ship[0].y;camera[19].y=ship[9].w;camera[19].z=1;camera[8].w=maxSpeed;
 }
 // Two vectored lift jets create pressure at their actual sea-plane footprints.
 // brush[3] holds the moving-domain shift, clear flag and combined strength;

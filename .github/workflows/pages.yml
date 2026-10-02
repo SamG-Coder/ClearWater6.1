@@ -27,6 +27,7 @@ jobs:
       - name: Check host and build scripts
         run: |
           node --check app.js
+          node --check game-shell.js
           node --check scripts/build.mjs
           node --check scripts/serve.mjs
           node --check scripts/verify.mjs
@@ -46,6 +47,7 @@ jobs:
           node --check scripts/space-effects-verify.mjs
           node --check scripts/shoreline-verify.mjs
           node --check scripts/horizon-verify.mjs
+          node --check scripts/menu-verify.mjs
       - name: Compile CUDA kernels and build static site
         run: npm run build
       - uses: actions/upload-pages-artifact@v4

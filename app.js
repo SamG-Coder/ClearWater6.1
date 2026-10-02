@@ -1,4 +1,5 @@
 import {GpuRuntime} from './vendor/webcuda/runtime/runtime.js';
+import {createGameShell} from './game-shell.js';
 const assetVersion=new URL(import.meta.url).searchParams.get('v')||'local';
 const $=id=>document.getElementById(id),canvas=$('water'),keys=new Set();
 const touchDevice=matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0;
@@ -16,6 +17,7 @@ let seaMemory,weatherClock=14*3600,weatherSeason=172,weatherDirty=true,weatherRe
 let kernelArtifacts;const kernelLoads=new Map();
 let navigation,zoomDelta=0,sandState,coefficients=null,runtime,context,kernels={},width=0,height=0,image,surface,light,monoLight,camera,fft,photons,disturbance,brush,seed,twiddles,motion;
 let flyFallback=false,lockPending=false;
+let gameShell=null,menuRedraw=true,flightProfile=0,playTime=0;
 let reset=1,playing=true,speed=3,time=0,last=0,lookX=0,lookY=0,drag=false,held=false,forceMoved=false,pointerX=0,pointerY=0,busy=false,failed=false;
 const params=new URLSearchParams(location.search),shipMode=params.get('mode')==='ship'||(!params.has('t')&&params.get('mode')!=='explorer');
 let shipMesh,shipBounds,shipData,shipInspect=false,shipAction=0;
@@ -30,7 +32,7 @@ $('season').onchange=()=>{weatherSeason=Number($('season').value);weatherDirty=t
 if(new URLSearchParams(location.search).get('geology')==='study')$('depthMode').value='0';
 $('depthMode').onchange=()=>{lastDepth=-1;weatherDirty=true;};
 $('worldSeed').onchange=()=>{weatherDirty=true;};
-function fail(e){failed=true;diagnostics.errors.push(String(e.message||e));$('error').hidden=false;$('error').textContent=diagnostics.errors.at(-1);$('loading').hidden=true;console.error(e);}
+function fail(e){failed=true;diagnostics.errors.push(String(e.message||e));$('error').hidden=false;$('error').textContent=diagnostics.errors.at(-1);$('loading').hidden=true;gameShell?.error(diagnostics.errors.at(-1));console.error(e);}
 function labels(){for(const id of ['depth','energy','wind','exposure'])$(id+'Value').textContent=Number($(id).value).toFixed(2)+(id==='depth'?' m':id==='wind'?' m/s':'');}labels();
 for(const id of ['depth','energy','wind','exposure'])$(id).oninput=()=>{if(id==='depth'){$('depthMode').value='0';lastDepth=-1;weatherDirty=true;}labels();};
 $('toggle').onclick=()=>{resetSticks();keys.clear();padPointers.clear();document.body.classList.toggle('clean');$('toggle').textContent=touchDevice?(document.body.classList.contains('clean')?'Settings':'Close settings'):(document.body.classList.contains('clean')?'Show controls ↙':'Hide controls ↗');};
@@ -46,6 +48,7 @@ $('shipFly').onclick=()=>$('fly').click();
 function flyStatus(message){$('flightStatus').hidden=!message;$('flightStatus').textContent=message;}
 function lockRefused(error){lockPending=false;flyFallback=true;diagnostics.pointerLock='drag';diagnostics.pointerLockReason=String(error?.message||'Browser refused mouse lock');$('fly').textContent='Retry mouse lock';$('fly').setAttribute('aria-pressed','true');flyStatus(shipMode?'Mouse lock was blocked. Drag to steer; W thrusts, S brakes, wheel changes speed.':'Mouse lock was blocked. Drag the water to look; WASD flies, wheel changes speed. Esc exits.');}
 $('fly').onclick=async()=>{
+ if(gameShell?.open)return;
  if(touchDevice){if(shipMode){$('shipInspect').click();return;}touchLook=!touchLook;$('fly').textContent=touchLook?'Push water':'Look around';$('touchMode').textContent=touchLook?'Mode: Look':'Mode: Water';return;}
  if(document.pointerLockElement===canvas){document.exitPointerLock();return;}
  if(lockPending)return;
@@ -70,7 +73,7 @@ for(const event of ['fullscreenchange','webkitfullscreenchange'])document.addEve
 
 $('quality').onchange=()=>{adaptiveScale=1;frameAverage=0;adaptCount=0;};
 for(const id of ['shallows','ocean'])$(id).onclick=()=>{const ocean=id==='ocean';$('depth').value=ocean?8:1.4;$('energy').value=ocean?1.8:.8;reset=ocean?2:1;for(const p of ['shallows','ocean'])$(p).classList.toggle('active',p===id);labels();};
-addEventListener('keydown',e=>{if(shipMode&&e.code==='KeyV'&&!e.repeat&&!['INPUT','SELECT'].includes(document.activeElement.tagName))$('shipInspect').click();if(e.code==='Escape'){document.exitPointerLock?.();drag=false;held=false;forceMoved=false;flyFallback=false;lockPending=false;flyStatus('');if(!touchDevice){$('fly').textContent='Fly camera ↗';$('fly').setAttribute('aria-pressed','false');}}if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
+addEventListener('keydown',e=>{if(gameShell?.open)return;if(shipMode&&e.code==='KeyV'&&!e.repeat&&!['INPUT','SELECT'].includes(document.activeElement.tagName))$('shipInspect').click();if(e.code==='Escape'){document.exitPointerLock?.();drag=false;held=false;forceMoved=false;flyFallback=false;lockPending=false;flyStatus('');if(!touchDevice){$('fly').textContent='Fly camera ↗';$('fly').setAttribute('aria-pressed','false');}}if(['INPUT','SELECT'].includes(document.activeElement.tagName))return;keys.add(e.code);if(e.code==='KeyH')$('toggle').click();if(e.code.startsWith('Arrow')||e.code==='Space')e.preventDefault();});
 addEventListener('keyup',e=>keys.delete(e.code));addEventListener('blur',()=>{keys.clear();drag=false;held=false;});
 function pointer(e){const r=canvas.getBoundingClientRect(),x=2*(e.clientX-r.left)/r.width-1,y=1-2*(e.clientY-r.top)/r.height;if(x!==pointerX||y!==pointerY)forceMoved=true;pointerX=x;pointerY=y;}
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
@@ -78,6 +81,7 @@ const zoomTouches=new Map();let pinchGap=0;
 let touchPointer=null,touchLastX=0,touchLastY=0;
 function endPointer(e){zoomTouches.delete(e.pointerId);if(zoomTouches.size<2)pinchGap=0;if(touchPointer===null||e.pointerId===touchPointer){drag=false;held=false;forceMoved=false;touchPointer=null;}}
 canvas.addEventListener('pointerdown',e=>{
+ if(gameShell?.open)return;
  if(e.pointerType==='touch'){zoomTouches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(zoomTouches.size===2){const [a,b]=[...zoomTouches.values()];pinchGap=Math.hypot(a.x-b.x,a.y-b.y);held=drag=forceMoved=false;touchPointer=null;canvas.setPointerCapture(e.pointerId);return;}}
  if(e.pointerType==='touch'&&touchPointer!==null)return;
  pointer(e);forceMoved=false;
@@ -86,16 +90,17 @@ canvas.addEventListener('pointerdown',e=>{
  canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove',e=>{
+ if(gameShell?.open)return;
  if(e.pointerType==='touch'&&zoomTouches.has(e.pointerId)){zoomTouches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(zoomTouches.size===2){const [a,b]=[...zoomTouches.values()],gap=Math.hypot(a.x-b.x,a.y-b.y);if(pinchGap>0&&gap>0)zoomDelta=Math.max(-8,Math.min(8,zoomDelta+Math.log(pinchGap/gap)*3));pinchGap=gap;return;}}
  if(e.pointerType==='touch'){
   if(e.pointerId!==touchPointer)return;
-  if(drag){lookX+=(e.clientX-touchLastX)*.004;lookY-=(e.clientY-touchLastY)*.004;}
+  if(drag){lookX+=(e.clientX-touchLastX)*.004*(gameShell?.sensitivity??1);lookY-=(e.clientY-touchLastY)*.004*(gameShell?.sensitivity??1)*(gameShell?.invertY?-1:1);}
   touchLastX=e.clientX;touchLastY=e.clientY;
  }
  if(document.pointerLockElement!==canvas)pointer(e);
 });
 for(const event of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(event,endPointer);
-addEventListener('mousemove',e=>{if((drag&&touchPointer===null)||document.pointerLockElement===canvas){lookX+=e.movementX*.0025;lookY-=e.movementY*.0025;if(document.pointerLockElement===canvas){pointerX=0;pointerY=0;}}});
+addEventListener('mousemove',e=>{if(gameShell?.open)return;if((drag&&touchPointer===null)||document.pointerLockElement===canvas){lookX+=e.movementX*.0025*(gameShell?.sensitivity??1);lookY-=e.movementY*.0025*(gameShell?.sensitivity??1)*(gameShell?.invertY?-1:1);if(document.pointerLockElement===canvas){pointerX=0;pointerY=0;}}});
 const padPointers=new Map();
 const sticks={move:{x:0,y:0,pointer:null}};
 function resetSticks(){for(const [name,stick] of Object.entries(sticks)){stick.x=stick.y=0;stick.pointer=null;const el=$(name+'Stick');el.classList.remove('active');el.querySelector('.stick-knob').style.transform='translate(0px,0px)';}}
@@ -105,18 +110,18 @@ for(const [name,stick] of Object.entries(sticks)){
   const amount=Math.max(0,(Math.min(1,length/radius)-.12)/.88);stick.x=length?dx/length*amount:0;stick.y=length?dy/length*amount:0;
   knob.style.transform=`translate(${dx*scale}px,${dy*scale}px)`;
  };
- el.addEventListener('pointerdown',e=>{if(stick.pointer!==null)return;e.preventDefault();stick.pointer=e.pointerId;el.setPointerCapture(e.pointerId);el.classList.add('active');update(e);});
+ el.addEventListener('pointerdown',e=>{if(gameShell?.open)return;if(stick.pointer!==null)return;e.preventDefault();stick.pointer=e.pointerId;el.setPointerCapture(e.pointerId);el.classList.add('active');update(e);});
  el.addEventListener('pointermove',e=>{if(e.pointerId===stick.pointer)update(e);});
  for(const event of ['pointerup','pointercancel','lostpointercapture'])el.addEventListener(event,e=>{if(e.pointerId!==stick.pointer)return;stick.x=stick.y=0;stick.pointer=null;el.classList.remove('active');knob.style.transform='translate(0px,0px)';});
 }
 for(const button of document.querySelectorAll('[data-move]')){
- button.addEventListener('pointerdown',e=>{e.preventDefault();padPointers.set(e.pointerId,button.dataset.move);keys.add(button.dataset.move);button.setPointerCapture(e.pointerId);button.classList.add('active');});
+ button.addEventListener('pointerdown',e=>{if(gameShell?.open)return;e.preventDefault();padPointers.set(e.pointerId,button.dataset.move);keys.add(button.dataset.move);button.setPointerCapture(e.pointerId);button.classList.add('active');});
  for(const event of ['pointerup','pointercancel','lostpointercapture'])button.addEventListener(event,e=>{const key=padPointers.get(e.pointerId);padPointers.delete(e.pointerId);if(key&&![...padPointers.values()].includes(key))keys.delete(key);button.classList.remove('active');});
 }
 addEventListener('blur',()=>{touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();});
 document.addEventListener('visibilitychange',()=>{last=0;held=drag=false;keys.clear();touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();});
 addEventListener('resize',resetSticks);
-canvas.addEventListener('wheel',e=>{e.preventDefault();const delta=Math.max(-1000,Math.min(1000,e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1)));if((shipMode||document.pointerLockElement===canvas||flyFallback)&&!e.ctrlKey){speed=Math.min(1000000,Math.max(.2,speed*Math.exp(-delta*.002)));diagnostics.flightSpeed=undefined;if(shipMode)$('shipLimit').textContent=formatDistance(speed)+'/s';updateMetrics();}else{zoomDelta=Math.max(-8,Math.min(8,zoomDelta+delta*.003));}},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();if(gameShell?.open)return;const delta=Math.max(-1000,Math.min(1000,e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1)));if((shipMode||document.pointerLockElement===canvas||flyFallback)&&!e.ctrlKey){speed=flightProfile?Math.min(1,Math.max(.1,speed*Math.exp(-delta*.002))):Math.min(1000000,Math.max(.2,speed*Math.exp(-delta*.002)));gameShell?.updateThrottle(speed);menuRedraw=true;diagnostics.flightSpeed=undefined;if(shipMode)$('shipLimit').textContent=formatDistance(speed)+'/s';updateMetrics();}else{zoomDelta=Math.max(-8,Math.min(8,zoomDelta+delta*.003));}},{passive:false});
 function resize(){
  const mobile=mobileProfile(),aspect=innerWidth/innerHeight;
  const lightChannels=mobile?1:3,lightSize=mapSize(),texels=lightSize*lightSize;
@@ -183,7 +188,7 @@ function compute(dt,timestampWrites){
  if(visitRain){b.dispatch(bind('weather_visit',{camera,navigationState:navigation},{latitude:0,longitude:0,altitude:5,findRain:1,mapSize:mapResolution}),[1,1,1]);visitRain=false;weatherDirty=true;}
  if(visitTerrain){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:-2500,clock:weatherClock,season:weatherSeason}),[1,1,1]);visitTerrain=false;weatherDirty=true;}
  if(geoEnabled&&(reset===1||reset===2)){b.dispatch(bind('geology_visit',{camera,navigationState:navigation},{targetDepth:reset===1?1.4:4500,clock:weatherClock,season:weatherSeason}),[1,1,1]);reset=0;weatherDirty=true;}
- if(shipMode)b.dispatch(bind('ship_step',{camera,navigationState:navigation,ship:shipData},{deltaTime:playing?dt:0,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),turn:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),rise:Math.max(-1,Math.min(1,axis('KeyE','KeyQ')+(keys.has('Space')?1:0))),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed,boost:keys.has('ShiftLeft')||keys.has('ShiftRight')?1:0,action:shipAction,inspect:shipInspect?1:0,depth,aspect:width/height}),[1,1,1]);
+ if(shipMode)b.dispatch(bind('ship_step',{camera,navigationState:navigation,ship:shipData},{deltaTime:playing?dt:0,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),turn:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),rise:Math.max(-1,Math.min(1,axis('KeyE','KeyQ')+(keys.has('Space')?1:0))),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed,boost:keys.has('ShiftLeft')||keys.has('ShiftRight')?1:0,action:shipAction,inspect:shipInspect?1:0,flightProfile,depth,aspect:width/height}),[1,1,1]);
  else b.dispatch(bind('camera_step',{camera,navigationState:navigation},{dt,forward:Math.max(-1,Math.min(1,axis('KeyW','KeyS')-sticks.move.y)),side:Math.max(-1,Math.min(1,axis('KeyD','KeyA')+sticks.move.x)),up:axis('KeyE','KeyQ'),lookX:lookX+axis('ArrowRight','ArrowLeft')*dt,lookY:lookY+axis('ArrowUp','ArrowDown')*dt,speed:speed*(keys.has('ShiftLeft')||keys.has('ShiftRight')?6:1),zoom:zoomDelta,reset,depth}),[1,1,1]);
  shipAction=0;zoomDelta=0;reset=0;lookX=lookY=0;
  b.dispatch(bind('terrain_cache_setup',{camera},{width:terrainWidth,offset:terrainOffset,enabled:geoEnabled,nearWidth:nearTerrainWidth,nearOffset:nearTerrainOffset}),[1,1,1]);
@@ -221,28 +226,31 @@ function compute(dt,timestampWrites){
  if(shipMode&&!(profileSkip&8))b.dispatch(bind('ship_render',{mesh:shipMesh,bounds:shipBounds,camera,ship:shipData,image},{width,height,samples,exposure}),[width/32,height/2,1]);
  b.endPass();b.encoder.copyBufferToTexture({buffer:image.gpuBuffer,bytesPerRow:width*4},{texture:context.getCurrentTexture()},[width,height]);b.submit();
 }
-function updateMetrics(){if(shipMode){$('shipSpeed').textContent=formatDistance(diagnostics.flightSpeed||0)+'/s';$('shipAltitude').textContent=formatDistance(diagnostics.shipAltitude??22);$('shipLimit').textContent=formatDistance(speed)+'/s';}if(diagnostics.ready)$('metrics').textContent=`${Math.round(diagnostics.fps)} FPS · ${width} × ${height} · ${formatDistance(diagnostics.altitude||2.6)} altitude · ${formatDistance(diagnostics.flightSpeed??speed)}/s`;}
+function updateMetrics(){if(shipMode){if(gameShell&&!shipInspect)$('shipModeLabel').textContent=flightProfile?`NORMAL GAME · ${(diagnostics.shipAltitude??22)>=80000?'SPACE FLIGHT':'ATMOSPHERIC FLIGHT'}`:'FREE ROAM · UNRESTRICTED';$('shipSpeed').textContent=formatDistance(diagnostics.flightSpeed||0)+'/s';$('shipAltitude').textContent=formatDistance(diagnostics.shipAltitude??22);$('shipLimit').textContent=formatDistance(flightProfile?(diagnostics.thrustLimit||0):speed)+'/s';}if(diagnostics.ready)$('metrics').textContent=`${Math.round(diagnostics.fps)} FPS · ${width} × ${height} · ${formatDistance(diagnostics.altitude||2.6)} altitude · ${formatDistance(diagnostics.flightSpeed??speed)}/s`;}
 function weatherLabels(){const w=diagnostics.localWeather;if(!w)return;const hour=Math.floor(w.hour),minute=Math.floor((w.hour-hour)*60);$('weatherStatus').textContent=`${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')} local · ${w.wind.toFixed(1)} m/s · ${w.rain>.1?'Rain':w.cloud>.5?'Cloudy':'Fair'}`;if(document.activeElement!==$('dayTime'))$('dayTime').value=(weatherClock/3600)%24;}
 function formatDistance(value){return value>=1000?(value/1000).toFixed(value>=100000?0:1)+' km':value.toFixed(1)+' m';}
 async function frame(now){
  if(failed)return;
  try{
   const mobile=mobileProfile(),interval=mobile?1000/30:0;
-  if(!busy&&!document.hidden&&(!last||now-last>=interval-.5)){
+  if(!busy&&!document.hidden&&(!gameShell?.open||menuRedraw)&&(!last||now-last>=interval-.5)){
+   menuRedraw=false;
    while(qualityKernels().some(name=>!kernels[name]?.loaded)){if(diagnostics.ready){$('loading').hidden=false;$('loadText').textContent='Preparing this quality profile…';}await ensureKernels(qualityKernels());}
-   const elapsed=last?(now-last)/1000:1/(mobile?30:60),dt=Math.min(.1,elapsed);last=now;resize();if(playing)time+=dt;
+   const elapsed=last?(now-last)/1000:1/(mobile?30:60),dt=Math.min(.1,elapsed);last=now;resize();if(playing){time+=dt;if(gameShell&&!gameShell.open)playTime+=dt;}
    const start=performance.now();compute(dt);await runtime.idle();
-   diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;diagnostics.ready=true;diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
+   diagnostics.frameMs=performance.now()-start;diagnostics.fps=1/elapsed;diagnostics.frames++;const firstReady=!diagnostics.ready;diagnostics.ready=true;if(firstReady)gameShell?.ready();diagnostics.readbackBytes=runtime.stats.readbackBytes;$('loading').hidden=true;
    frameAverage=frameAverage?frameAverage*.94+diagnostics.frameMs*.06:diagnostics.frameMs;
    if(mobile&&++adaptCount>=60){if(frameAverage>25&&adaptiveScale>.5)adaptiveScale=Math.max(.5,adaptiveScale-.1);else if(frameAverage<12&&adaptiveScale<1)adaptiveScale=Math.min(1,adaptiveScale+.05);adaptCount=0;}
-   if(((shipMode&&diagnostics.frames===1)||diagnostics.frames%15===0)&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];if(shipMode)diagnostics.shipAltitude=v[44];zoomTail=Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[53]>0?v[53]:v[52])} ${v[53]>0?'elevation':'deep'} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
+   if(((shipMode&&diagnostics.frames===1)||diagnostics.frames%15===0)&&!telemetryBusy){telemetryBusy=true;runtime.read(camera,Float32Array,256,128).then(v=>{diagnostics.altitude=v[0];diagnostics.flightSpeed=v[1];if(shipMode){diagnostics.shipAltitude=v[44];diagnostics.thrustLimit=v[3];}zoomTail=!shipMode&&Math.abs(v[3])>.00001;diagnostics.localWeather={wind:v[10],cloud:v[11],rain:v[12],sunlight:v[13],temperature:v[14],pressure:v[15],hour:v[39]};diagnostics.oceanDepth=v[52];$('geologyStatus').textContent=`${formatDistance(v[53]>0?v[53]:v[52])} ${v[53]>0?'elevation':'deep'} · seed ${geologySeed}`;weatherLabels();updateMetrics();}).catch(fail).finally(()=>telemetryBusy=false);}
    if(diagnostics.frames===1||diagnostics.frames%15===0)updateMetrics();
+   if(gameShell)await gameShell.tick(now);
   }
   requestAnimationFrame(frame);
  }catch(e){fail(e);}
 }
 async function exclusive(fn){busy=true;try{await runtime.idle();await ensureKernels(qualityKernels());return await fn();}finally{busy=false;}}
 window.waterLab={
+ sessionState(){return {shell:gameShell?.state,playing,time,clock:weatherClock,playTime,flightProfile,throttle:speed,frames:diagnostics.frames};},
  async shipCost(samples=30){let full,water;try{profileSkip=0;full=await waterLab.benchmark(samples);profileSkip=8;water=await waterLab.benchmark(samples);}finally{profileSkip=0;}return {full,water,scope:'Sequential full-scene measurements with and without the ship render pass; not an isolated per-pass timing'};},
  async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[39],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:126};});},
  async shipView(yaw=.34,elevation=.3,distance=22){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([yaw,elevation,distance,1]));shipInspect=true;weatherDirty=true;compute(0);await runtime.idle();const c=await runtime.read(camera,Float32Array,320);diagnostics.altitude=c[1];diagnostics.shipAltitude=c[76];diagnostics.flightSpeed=c[77];updateMetrics();});},
@@ -363,6 +371,41 @@ window.waterLab={
  });},
  async benchmark(samples=40,animate=false){return exclusive(async()=>{if(!runtime.device.features.has('timestamp-query'))return {unsupported:true};playing=animate;const qs=runtime.device.createQuerySet({type:'timestamp',count:2}),resolve=runtime.device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),read=runtime.device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const times=[];try{for(let i=0;i<samples+8;i++){if(animate)time+=1/60;compute(animate?1/60:0,{querySet:qs,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1});const enc=runtime.device.createCommandEncoder();enc.resolveQuerySet(qs,0,2,resolve,0);enc.copyBufferToBuffer(resolve,0,read,0,16);runtime.device.queue.submit([enc.finish()]);await read.mapAsync(GPUMapMode.READ);const t=new BigUint64Array(read.getMappedRange());if(i>=8)times.push(Number(t[1]-t[0])/1e6);read.unmap();}times.sort((a,b)=>a-b);return {width,height,samples,animated:animate,medianMs:times[Math.floor(samples/2)],p95Ms:times[Math.floor(samples*.95)],scope:'GPU camera, global weather, sky cache when due, spectrum, FFT, normals, caustics and render; excludes texture copy and browser presentation',adapter:runtime.describe()};}finally{qs.destroy();resolve.destroy();read.destroy();}});}
 };
+function clearGameInput(){
+ keys.clear();lookX=lookY=zoomDelta=0;drag=held=forceMoved=flyFallback=lockPending=false;touchPointer=null;zoomTouches.clear();pinchGap=0;padPointers.clear();resetSticks();
+ for(const el of document.querySelectorAll('[data-move]'))el.classList.remove('active');
+ if(document.pointerLockElement===canvas)document.exitPointerLock();flyStatus('');
+}
+async function startSession(kind,saved){
+ return exclusive(async()=>{
+  playing=false;clearGameInput();flightProfile=kind==='normal'?1:0;speed=saved?.speed??(flightProfile ? .65 : 40);playTime=saved?.playTime??0;
+  time=saved?.time??0;weatherClock=saved?.clock??14*3600;weatherSeason=saved?.season??172;
+  for(const [id,value] of Object.entries({depthMode:1,worldSeed:saved?.seed??61,depth:1.4,energy:.8,wind:5,view:0,weatherMode:1,weatherRate:60,season:weatherSeason}))$(id).value=String(value);
+  labels();shipInspect=false;$('shipInspect').textContent='Inspect ship · V';$('shipModeLabel').textContent=flightProfile?'NORMAL GAME · ATMOSPHERIC FLIGHT':'FREE ROAM · UNRESTRICTED';
+  // Only small state/header buffers are reset. Terrain caches rebuild on demand.
+  const enc=runtime.device.createCommandEncoder();
+  for(const buffer of [navigation,shipData,brush,disturbance,seaMemory,motion,...(sandState?[sandState]:[])])enc.clearBuffer(buffer.gpuBuffer);
+  enc.clearBuffer(camera.gpuBuffer,0,512);enc.clearBuffer(camera.gpuBuffer,nearTerrainOffset*16,128);runtime.device.queue.submit([enc.finish()]);
+  geologySeed=-1;geologySize=0;lastDepth=lastWind=lastWeatherMode=-1;weatherMapAt=weatherSkyAt=-Infinity;weatherDirty=true;weatherRefresh=1;visitRain=visitTerrain=false;zoomTail=false;
+  reset=saved?0:1;shipAction=saved?0:1;
+  if(saved){runtime.device.queue.writeBuffer(navigation.gpuBuffer,0,new Float32Array(saved.navigation));runtime.device.queue.writeBuffer(shipData.gpuBuffer,0,new Float32Array(saved.ship));runtime.device.queue.writeBuffer(camera.gpuBuffer,0,new Float32Array(saved.camera));}
+  resize();compute(0);await runtime.idle();menuRedraw=true;gameShell.updateThrottle(speed);
+  const c=await runtime.read(camera,Float32Array,256,128);diagnostics.shipAltitude=c[44];diagnostics.flightSpeed=c[1];diagnostics.thrustLimit=c[3];updateMetrics();
+ });
+}
+if(shipMode&&fixed===null){
+ gameShell=createGameShell({touch:touchDevice,labels,notice:flyStatus,
+  pause(){playing=false;clearGameInput();last=0;},
+  resume(){clearGameInput();playing=true;last=0;canvas.focus({preventScroll:true});},
+  redraw(){menuRedraw=true;weatherDirty=true;},
+  throttle(value){speed=value;gameShell.updateThrottle(speed);},
+  start:startSession,
+  async snapshot(){return exclusive(async()=>{const [nav,ship,header]=await Promise.all([runtime.read(navigation),runtime.read(shipData),runtime.read(camera,Float32Array,320)]);return {navigation:Array.from(nav),ship:Array.from(ship),camera:Array.from(header),time,clock:weatherClock,season:weatherSeason,seed:geologySeed,speed,playTime};});}
+ });
+ labels();playing=false;shipAction=3;shipInspect=true;
+ addEventListener('resize',()=>{menuRedraw=true;});
+ $('worldControls').addEventListener('click',()=>{menuRedraw=true;});
+}
 try{
  if(!navigator.gpu)throw Error('WebGPU is unavailable in this browser. Use a supported Chrome device, or Safari 26 or newer on iPhone, and open the HTTPS site.');
  runtime=await GpuRuntime.create({onError:fail});context=canvas.getContext('webgpu');
@@ -374,5 +417,6 @@ try{
  await ensureKernels([...names.filter(name=>!optional.has(name)),...qualityKernels()]);
  motion=runtime.createBuffer(114688*4);twiddles=runtime.createBuffer(64*8);seed=runtime.createBuffer(49152*16);fft=[runtime.createBuffer(49152*8),runtime.createBuffer(49152*8)];surface=runtime.createBuffer(49152*16);light=runtime.createBuffer(16);monoLight=runtime.createBuffer(4);photons=runtime.createBuffer(4);navigation=runtime.createBuffer(8*8);camera=runtime.createBuffer((nearTerrainOffset+8+nearTerrainWidth*nearTerrainWidth*2)*16);plates=runtime.createBuffer(28*32);seaMemory=runtime.createBuffer(32768*4);brush=runtime.createBuffer(shipMode?176:48);disturbance=runtime.createBuffer(16384*16);diagnostics.adapter=runtime.describe();
  if(shipMode){shipMesh=runtime.createBuffer(71680*6*16);shipBounds=runtime.createBuffer((255+128*85+1024)*2*16);shipData=runtime.createBuffer(64*16);const b=runtime.batch();b.dispatch(bind('ship_mesh',{mesh:shipMesh,bounds:shipBounds}),[1120,1,1]);for(let level=0;level<=12;level++){const count=level===0?8960:level<5?128*(level===1?64:level===2?16:level===3?4:1):128>>(level-5);b.dispatch(bind('ship_bounds',{mesh:shipMesh,bounds:shipBounds},{level}),[Math.ceil(count/64),1,1]);}b.submit();diagnostics.shipTriangles=71680;}
+ if(gameShell){resize();compute(0);await runtime.idle();runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([-.18,1.12,42,1]));weatherDirty=true;}
  requestAnimationFrame(frame);
 }catch(e){fail(e);}

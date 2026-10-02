@@ -18,17 +18,34 @@ Open http://127.0.0.1:5191 in a browser with WebGPU enabled. `npm run build` com
 
 ## Spacecraft flight
 
-Ordinary visits now start in third-person spacecraft flight. The original water study remains at `?mode=explorer`; frozen `?t=` diagnostic fixtures keep the water-study mode unless `mode=ship` is explicit.
+Ordinary visits open the spacecraft-themed main menu over a rendered orbital scene. **Continue Game** restores a saved normal flight, **New Game** starts a fresh normal flight (with confirmation before replacing an existing save), and **Free Roam** starts an unrestricted session without replacing normal progress. The menu appears during GPU initialization; launch buttons become available when the world is ready. The original water study remains at `?mode=explorer`; frozen `?t=` diagnostic fixtures bypass the game menu and retain the exploration flight profile.
+
+**Esc** pauses the ship, FFT simulation and weather clock, clears held inputs and releases the pointer. Resume, Settings and Main Menu are available from the pause screen. Losing mouse lock, hiding the tab or switching windows also pauses a running game. Paused menus retain the last rendered frame and stop continuous GPU dispatch; a graphics change or resize requests a fresh frame without advancing time.
+
+Graphics and flight-control settings share the same screen from the main and pause menus. Resolution, exposure, look sensitivity, inverted pitch and HUD visibility persist separately from progress. Free Roam additionally exposes the original world, weather, depth and debug-view controls. Normal play hides world edits and teleport shortcuts. Phones retain the movement joystick and drag-to-look, with altitude buttons, a held Boost button and a normal-game throttle slider.
+
+Normal progress autosaves every 30 seconds while playing, when pausing, and before returning to the main menu. The versioned local save contains the high/low precision navigation pairs, ship pose/velocity, procedural seed, simulation time, weather clock, season, play time and throttle. Continue rebuilds procedural caches; transient wakes and transported sand are regenerated. Graphics preferences are independent. Saves belong to this browser and origin, are not cloud saves, and can be removed by clearing site data. Invalid saves are rejected; storage failures are shown instead of reporting a successful save.
+
+Normal flight uses an altitude-dependent envelope in `src/ship.cu`. At full throttle:
+
+| Altitude | Cruise limit | Boost limit |
+| --- | ---: | ---: |
+| Sea level to 1.5 km | 180 m/s | 450 m/s |
+| 12 km | 420 m/s | 1,050 m/s |
+| 80 km | 1,200 m/s | 3,000 m/s |
+| 600 km and beyond | 150 km/s | 600 km/s |
+
+The limits blend smoothly between those heights. Wheel input or the slider sets 10–100% throttle; new games start at 65%. The CUDA controller caps the complete velocity vector, including combined rise/thrust and high-speed re-entry. These are balanced game speeds, not a physical spacecraft specification. Free Roam retains the original wheel-scaled exploration speeds.
 
 The original ship is generated entirely in `src/ship.cu`, with 126 separate components and 67,840 nondegenerate triangles, denser curved hull and canopy meshes, mirrored wings and stabilizers, turbine intakes, ribbed exhaust hardware, a cockpit frame and interior, procedural paint/metal/glass materials, panel seams, serial markings, self-shadowing and thrust-responsive blue exhaust volumes. No spacecraft models or texture images are imported. The static triangle mesh and its two-level bounding-volume hierarchy are generated once on the GPU. Navigation, flight response, banking, camera tracking, geometry, materials and ray tracing remain in CUDA.
 
 - **W / S:** thrust / brake. **A / D:** turn and bank.
-- **Drag** to steer, or use **Lock mouse**. **Esc** releases the pointer.
+- **Drag** to steer, or use **Lock mouse**. **Esc** pauses and releases the pointer (diagnostic fixtures only release it).
 - **Space or E / Q:** rise / descend. **Shift:** boost.
-- **Mouse wheel:** increase / decrease the thrust limit.
+- **Mouse wheel:** increase / decrease throttle in Normal Game, or the unrestricted thrust limit in Free Roam.
 - **V / Inspect ship:** orbit the craft without steering it.
-- **Space** in the toolbar moves to orbital altitude above the current location; **Ocean** returns to a surface preset.
-- **Moon** moves to a lunar approach for inspecting its phases and continuing free flight.
+- In **Free Roam**, **Space** in the toolbar moves to orbital altitude above the current location; **Ocean** returns to a surface preset.
+- In **Free Roam**, **Moon** moves to a lunar approach for inspecting its phases and continuing free flight.
 - Phones use the movement joystick, screen-drag steering and altitude buttons. Portrait view automatically increases chase distance to keep both wings in frame.
 
 Steering uses damped angular response, velocity inertia, turn-driven banking and a short chase-camera lag. Releasing thrust coasts; braking settles the craft quickly. Boost smoothly increases exhaust output and camera distance.
@@ -43,7 +60,7 @@ The Moon is a procedural sphere at a mean distance of 384,400 km and radius of 1
 
 This stage is a flight and spacecraft-rendering prototype. It has Earth terrain clearance, but no lunar landing/collision system, walking character, combat, inventory or survival loop. Hull reflections/shadows are not yet integrated into the ocean surface. Self-shadowing uses mesh intersections; glass, spray and exhaust lighting are approximations. PC keeps four spatial samples; the mobile profile uses the same mesh with one sample and the existing adaptive framebuffer.
 
-`npm run test:ship` checks exact mirrored geometry, both upward stabilizers, BVH intersections against an independent brute-force triangle oracle, actual flight/bank/orbit/wheel controls, mouse lock, touch joystick/steering, surface/space solar-time continuity and actual 2560×1440 / 3840×2160 output. It saves screenshots and GPU timing results under `captures/`. `npm run test:flight` checks coast/brake/steering response, 30 versus 120 Hz consistency, near-water engine pressure, wake locality and decay after takeoff. Phone viewport emulation does not measure a physical phone GPU.
+`npm run test:ship` checks exact mirrored geometry, both upward stabilizers, BVH intersections against an independent brute-force triangle oracle, actual flight/bank/orbit/wheel controls, mouse lock, touch joystick/steering, surface/space solar-time continuity and actual 2560×1440 / 3840×2160 output. It saves screenshots and GPU timing results under `captures/`. `npm run test:flight` checks coast/brake/steering response, 30 versus 120 Hz consistency, near-water engine pressure, wake locality and decay after takeoff. Phone viewport emulation does not measure a physical phone GPU. `npm run test:menu` checks main/pause/settings navigation, stationary GPU frame counts while paused, 1440p and 4K output, real CUDA flight limits, reload/Continue with precise navigation, save corruption handling, isolated Free Roam, new-game replacement and Android/iPhone menu layouts.
 
 ## Explore
 
