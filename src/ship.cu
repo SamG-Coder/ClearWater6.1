@@ -1,6 +1,6 @@
 // Original ClearWater spacecraft. Geometry, navigation, ray traversal and
 // materials are CUDA; the browser only dispatches kernels and forwards input.
-// 128 manufactured components; the hull and canopy get denser curved meshes.
+// 126 manufactured components; the hull and canopy get denser curved meshes.
 // Static geometry and a
 // two-level BVH are built once, then shared by primary and sunlight rays.
 __device__ int ship_tri_base(int part){return part<4?part*2048:6144+part*512;}
@@ -40,7 +40,8 @@ __device__ ShipPart ship_component(int id){
  }else{
   int side=id<80?-1:1,k=(id-32)%48;float s=1;p.mirror=side;
   if(k==0){p.shape=1;p.size=vec(s*5.7f,.26f,3.15f);p.centre=vec(s*1.0f,-.13f,.7f);}
-  if(k==1){p.shape=1;p.size=vec(s*4.2f,.10f,.38f);p.centre=vec(s*2.3f,.10f,-1.35f);p.material=1;}
+  // Retired winglet slots keep component IDs and the binary BVH layout stable.
+  if(k==1){p.size=vec(0,0,0);p.material=-1;}
   if(k==2){p.shape=2;p.size=vec(1.0f,1.0f,2.65f);p.centre=vec(s*4.65f,.22f,2.25f);p.material=2;}
   if(k==3){p.shape=2;p.size=vec(1.13f,1.13f,1.40f);p.centre=vec(s*4.65f,.22f,.72f);p.material=0;}
   if(k==4){p.shape=3;p.size=vec(.87f,.17f,.75f);p.centre=vec(s*4.65f,.22f,-.72f);p.material=2;}
@@ -171,7 +172,7 @@ __device__ ShipHit ship_trace(const float4 *mesh,const float4 *bounds,float3 ori
   if(ship_box_hit(bounds,top,origin,inv,hit.t)==0){top=ship_next(top,2);continue;}
   if(top<127){top=top*2+1;continue;}
   int part=top-127,node=0,base=ship_node_base(part),firstLeaf=part<4?85:21;
-  if(shadow==2&&part==2){top=ship_next(top,2);continue;}
+  if(bounds[base*2].w<0||(shadow==2&&part==2)){top=ship_next(top,2);continue;}
   while(node>=0){
    if(ship_box_hit(bounds,base+node,origin,inv,hit.t)==0){node=ship_next(node,4);continue;}
    if(node<firstLeaf){node=node*4+1;continue;}

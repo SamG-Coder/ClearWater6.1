@@ -20,7 +20,7 @@ Open http://127.0.0.1:5191 in a browser with WebGPU enabled. `npm run build` com
 
 Ordinary visits now start in third-person spacecraft flight. The original water study remains at `?mode=explorer`; frozen `?t=` diagnostic fixtures keep the water-study mode unless `mode=ship` is explicit.
 
-The original ship is generated entirely in `src/ship.cu`, with 128 separate components and 68,800 nondegenerate triangles, denser curved hull and canopy meshes, mirrored wings and stabilizers, turbine intakes, ribbed exhaust hardware, a cockpit frame and interior, procedural paint/metal/glass materials, panel seams, serial markings, self-shadowing and thrust-responsive blue exhaust volumes. No spacecraft models or texture images are imported. The static triangle mesh and its two-level bounding-volume hierarchy are generated once on the GPU. Navigation, flight response, banking, camera tracking, geometry, materials and ray tracing remain in CUDA.
+The original ship is generated entirely in `src/ship.cu`, with 126 separate components and 67,840 nondegenerate triangles, denser curved hull and canopy meshes, mirrored wings and stabilizers, turbine intakes, ribbed exhaust hardware, a cockpit frame and interior, procedural paint/metal/glass materials, panel seams, serial markings, self-shadowing and thrust-responsive blue exhaust volumes. No spacecraft models or texture images are imported. The static triangle mesh and its two-level bounding-volume hierarchy are generated once on the GPU. Navigation, flight response, banking, camera tracking, geometry, materials and ray tracing remain in CUDA.
 
 - **W / S:** thrust / brake. **A / D:** turn and bank.
 - **Drag** to steer, or use **Lock mouse**. **Esc** releases the pointer.

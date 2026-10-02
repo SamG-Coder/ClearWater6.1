@@ -232,7 +232,7 @@ async function frame(now){
 async function exclusive(fn){busy=true;try{await runtime.idle();await ensureKernels(qualityKernels());return await fn();}finally{busy=false;}}
 window.waterLab={
  async shipCost(samples=30){let full,water;try{profileSkip=0;full=await waterLab.benchmark(samples);profileSkip=8;water=await waterLab.benchmark(samples);}finally{profileSkip=0;}return {full,water,scope:'Sequential full-scene measurements with and without the ship render pass; not an isolated per-pass timing'};},
- async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[7],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:128};});},
+ async shipState(){return exclusive(async()=>{const data=await runtime.read(shipData);return {data:Array.from(data),position:Array.from(data.slice(0,3)),angles:Array.from(data.slice(4,7)),speed:data[7],clearance:data[14],finite:data.every(Number.isFinite),triangles:71680,components:126};});},
  async shipView(yaw=.34,elevation=.3,distance=22){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,32,new Float32Array([yaw,elevation,distance,1]));shipInspect=true;weatherDirty=true;compute(0);await runtime.idle();});},
  async shipAltitude(metres){return exclusive(async()=>{runtime.device.queue.writeBuffer(shipData.gpuBuffer,4,new Float32Array([metres]));weatherDirty=true;compute(0);await runtime.idle();});},
  async shipRayTest(){return exclusive(async()=>{
