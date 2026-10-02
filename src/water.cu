@@ -1872,7 +1872,7 @@ __device__ float3 craft_water(float3 col,float3 p,float3 n,float3 ray,const floa
   float rough=.08f+.18f*clamp01(foam),a2=rough*rough,den=nh*nh*(a2-1)+1;
   float spec=a2/(3.14159265f*den*den+.00001f)*.035f;
   float amount=source.w/(4+d2)*(1-eased(1600,3600,d2))*cone*(nl*(.025f+foam*.3f)+spec);
-  float3 hue=i<2?vec(.045f,.30f,1):vec(.68f,.84f,1);col=plus(col,scale(hue,amount));
+  float3 hue=i<2?vec(brush[11].x,brush[11].y,brush[11].z):vec(.68f,.84f,1);col=plus(col,scale(hue,amount));
  }
  return col;
 }

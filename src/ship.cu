@@ -166,8 +166,16 @@ __device__ float ship_game_limit(float altitude,int boost){
  float boosted=mixf(450,1050,low);boosted=mixf(boosted,3000,upper);boosted=mixf(boosted,600000,space);
  return boost!=0?boosted:cruise;
 }
+// Three persistent linear colours. Browser writes sRGB + w=1; conversion runs
+// once per edit in this single-thread flight kernel, never per shaded pixel.
+__device__ float ship_srgb(float c){return c<=.04045f?c/12.92f:positive_power((c+.055f)/1.055f,2.4f);}
+__device__ void ship_prepare_colours(float4 *ship){
+ if(ship[11].w==0){ship[11]=make_float4(.55f,.61f,.60f,2);ship[12]=make_float4(.65f,.145f,.035f,2);ship[13]=make_float4(.045f,.30f,1,2);}
+ for(int i=11;i<=13;i++){float4 c=ship[i];if(c.w==1)ship[i]=make_float4(ship_srgb(c.x),ship_srgb(c.y),ship_srgb(c.z),2);}
+}
 __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,float deltaTime,float forward,float turn,float rise,float lookX,float lookY,float speed,int boost,int action,int inspect,int flightProfile,float depth,float aspect){
  float dt=fminf(.1f,fmaxf(0,deltaTime));
+ ship_prepare_colours(ship);
  if(ship[0].w==0||action==1){
   if(camera[8].z==0){float navLength=navigationState[0].x*navigationState[0].x+navigationState[1].x*navigationState[1].x+navigationState[2].x*navigationState[2].x;camera_advance(camera,navigationState,0,0,0,0,0,0,1,0,navLength>.5f?0:1,depth);}
   ship[0]=make_float4(camera[0].x,22,camera[0].z,1);ship[1]=make_float4(0,0,0,0);ship[2]=make_float4(.34f,.30f,22,0);ship[3]=make_float4(0,.16f,0,speed);
@@ -284,6 +292,7 @@ __global__ void ship_wash_pick(const float4 *camera,const float4 *ship,float4 *b
   brush[8+i]=make_float4(lamp.x,lamp.y,lamp.z,night*160);
  }
  float3 lampDirection=ship_axis(ship,unit(vec(0,-.62f,-1)));brush[10]=make_float4(lampDirection.x,lampDirection.y,lampDirection.z,ship[3].x);
+ brush[11]=ship[13]; // The water receives the same linear booster light as the hull.
  float strength=brush[4].w+brush[5].w;
  if(strength>.0001f){
   float x=(brush[4].x+brush[5].x)*.5f,z=(brush[4].y+brush[5].y)*.5f,dx=x-old.x,dz=z-old.y;
@@ -354,13 +363,13 @@ __device__ float ship_serial(float x,float y,float footprint){
  if(digit==0)mark=fmaxf(mark,fmaxf(ship_line(u-.08f,.024f,footprint),fmaxf(ship_line(v-.04f,.024f,footprint),ship_line(v-.58f,.024f,footprint)))*eased(.035f,.065f,u)*(1-eased(.345f,.37f,u)));
  return clamp01(mark);
 }
-// Finite local emitters put real blue spill on exhaust rims and nearby panels.
+// Finite local emitters put the selected booster light on nearby panels.
 // Navigation lamps and landing strips remain readable on the night side.
 __device__ float3 ship_local_light(float3 p,float3 n,float3 view,float3 albedo,const float4 *camera,const float4 *ship){
  float3 radiance=vec(0,0,0);float night=1-eased(-.04f,.18f,camera[9].y);
  for(int i=0;i<6;i++){
   float side=(i%2)==0?-1:1;float3 position=i<2?vec(side*4.65f,.22f,5.5f):i<4?vec(side*6.68f,.24f,1.35f):vec(side*.70f,.36f,-3.7f);
-  float3 hue=i<2?vec(.045f,.30f,1):i<4?((i%2)==0?vec(1,.025f,.008f):vec(.025f,1,.22f)):vec(.62f,.80f,1);
+  float3 hue=i<2?ship_xyz(ship[13]):i<4?((i%2)==0?vec(1,.025f,.008f):vec(.025f,1,.22f)):vec(.62f,.80f,1);
   float power=i<2?8+ship[3].y*28:i<4?1.3f:night*2.5f;
   float3 delta=minus(position,p);float d2=dotv(delta,delta);if(d2>144)continue;float3 l=unit(delta),halfv=unit(plus(l,view));
   float diffuse=fmaxf(0,dotv(n,l)),spec=positive_power(fmaxf(0,dotv(n,halfv)),48)*.65f;
@@ -379,13 +388,13 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  int tri=hit.triangle,mat=(int)bounds[ship_node_base(hit.part)*2].w;float w=1-hit.u-hit.v;
  float3 n=unit(plus(scale(ship_xyz(mesh[tri*6+3]),w),plus(scale(ship_xyz(mesh[tri*6+4]),hit.u),scale(ship_xyz(mesh[tri*6+5]),hit.v))));if(dotv(n,ray)>0)n=scale(n,-1);
  float3 p=plus(ship_xyz(ship[7]),scale(ray,hit.t));float u=mesh[tri*6].w*w+mesh[tri*6+1].w*hit.u+mesh[tri*6+2].w*hit.v,v=mesh[tri*6+3].w*w+mesh[tri*6+4].w*hit.u+mesh[tri*6+5].w*hit.v;
- float3 color=vec(.55f,.61f,.60f);float rough=.29f,metal=.30f,emission=0;
- if(mat==1){color=vec(.65f,.145f,.035f);rough=.29f;metal=.25f;}
+ float3 color=ship_xyz(ship[11]);float rough=.29f,metal=.30f,emission=0;
+ if(mat==1){color=ship_xyz(ship[12]);rough=.29f;metal=.25f;}
  if(mat==2){color=vec(.025f,.035f,.042f);rough=.44f;metal=.7f;}
  if(mat==3){color=vec(.015f,.055f,.075f);rough=.075f;metal=.22f;}
  if(mat==4){color=vec(.18f,.22f,.25f);rough=.28f;metal=.92f;}
  if(mat==5){color=vec(.016f,.021f,.025f);rough=.53f;metal=.72f;}
- if(mat==6){float cx=hit.part<32?0:(hit.part<80?-4.65f:4.65f),cy=hit.part<32?-.14f:.22f;float rr=(p.x-cx)*(p.x-cx)+(p.y-cy)*(p.y-cy);float core=expf(-rr*12);color=blend(vec(.012f,.08f,.7f),vec(.4f,.8f,1),core);emission=(.6f+core*7)*(1+ship[3].y*2);}
+ if(mat==6){float cx=hit.part<32?0:(hit.part<80?-4.65f:4.65f),cy=hit.part<32?-.14f:.22f;float rr=(p.x-cx)*(p.x-cx)+(p.y-cy)*(p.y-cy);float core=expf(-rr*12);float3 hue=ship_xyz(ship[13]);float peak=fmaxf(hue.x,fmaxf(hue.y,hue.z));color=blend(scale(hue,.75f),blend(hue,vec(peak,peak,peak),.32f),core);emission=(.6f+core*7)*(1+ship[3].y*2);}
  if(mat==7){color=vec(1,.045f,.01f);emission=3;}
  if(mat==8){color=vec(.08f,1,.50f);emission=3;}
  if(mat==9){color=vec(.014f,.025f,.028f);rough=.65f;metal=.1f;if(hit.part==5&&n.y>.2f){color=vec(.015f,.17f,.22f);emission=1;}}
@@ -409,7 +418,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
   float detail=1-eased(.008f,.028f,fp),micro=cell(floorf(p.x*180),floorf(p.z*180));color=scale(color,1+detail*(micro-.5f)*.022f);
   if(component==3){float soot=eased(.70f,1,v)*(.045f+.07f*globe_noise(scale(p,6)));color=blend(color,vec(.09f,.095f,.085f),soot);}
   if(component==9){float dx=fabsf(ax-4.65f)-.37f,dz=fabsf(p.z-.82f)-.96f;float fastener=1-eased(.021f,.021f+fp,sqrtf(dx*dx+dz*dz));color=blend(color,vec(.04f,.055f,.061f),fastener*.7f);}
-  if(component==0&&ax>5.7f){float stripe=ship_line(p.z-2.1f,.12f,fp);color=blend(color,vec(.60f,.105f,.025f),stripe);}
+  if(component==0&&ax>5.7f){float stripe=ship_line(p.z-2.1f,.12f,fp);color=blend(color,scale(ship_xyz(ship[12]),.9f),stripe);}
  }
  if(mat==4){float heat=eased(2.8f,4.9f,p.z);color=blend(color,vec(.17f,.13f,.19f),heat*.32f);rough+=globe_noise(vec(p.x*25,p.y*25,p.z*3))*.08f;}
  if(mat==0&&hit.part>=32&&(hit.part-32)%48==0&&n.y>.4f){float serial=ship_serial(fabsf(p.x)-2.65f,p.z-.1f,fp);color=blend(color,vec(.02f,.035f,.04f),serial);}
@@ -441,7 +450,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
 __device__ float3 ship_decode(unsigned color){return vec((float)(color&255u)/255,(float)((color>>8)&255u)/255,(float)((color>>16)&255u)/255);}
 __device__ float ship_unfilm(float c){float y=positive_power(c,2.2f),a=2.51f-2.43f*y,b=.03f-.59f*y;return (-b+sqrtf(b*b+.56f*a*y))/(2*a);}
 __device__ float3 ship_plume(const float4 *ship,float3 origin,float3 ray,float limit){
- float3 light=vec(0,0,0);float thrust=fmaxf(.12f,ship[3].y),length=1.5f+thrust*5.5f;
+ float3 light=vec(0,0,0),booster=ship_xyz(ship[13]);float peak=fmaxf(booster.x,fmaxf(booster.y,booster.z));float thrust=fmaxf(.12f,ship[3].y),length=1.5f+thrust*5.5f;
  for(int engine=0;engine<2;engine++){
   float cx=engine==0?-4.65f:4.65f,ox=origin.x-cx,oy=origin.y-.22f;
   float a=ray.x*ray.x+ray.y*ray.y,b=ox*ray.x+oy*ray.y,c=ox*ox+oy*oy-.75f*.75f,disc=b*b-a*c;
@@ -452,7 +461,7 @@ __device__ float3 ship_plume(const float4 *ship,float3 origin,float3 ray,float l
   for(int j=0;j<8;j++){
    float t=lo+((float)j+.5f)*step,z=origin.z+ray.z*t-5.03f,q=z/length,radius=.50f*(1-.84f*q),x=ox+ray.x*t,y=oy+ray.y*t,r=(x*x+y*y)/(radius*radius);
    float envelope=expf(-r*3.5f)*eased(1,0,q),diamonds=.72f+.28f*cosf(z*9-thrust*1.5f);
-   float3 hue=blend(vec(.08f,.25f,1.8f),vec(.45f,1.4f,2.8f),expf(-r*8));light=plus(light,scale(hue,envelope*diamonds*step*(1+thrust)*1.2f));
+   float3 hue=scale(blend(booster,vec(peak,peak,peak),expf(-r*8)*.16f),2.2f);light=plus(light,scale(hue,envelope*diamonds*step*(1+thrust)*1.2f));
   }
  }
  return light;
