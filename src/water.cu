@@ -275,7 +275,7 @@ __global__ void planet_probe(const float4 *points,float4 *output,int count){
 // Navigation uses software double precision in one GPU invocation. Rendering
 // uses camera-relative metres, with altitude stored separately from Earth radius.
 // navigation: global unit up, transported unit east, accumulated local UV metres.
-__global__ void camera_step(float4 *camera,float2 *navigationState,float dt,float forward,float side,float up,float lookX,float lookY,float speed,float zoom,int reset,float depth){
+__device__ void camera_advance(float4 *camera,float2 *navigationState,float dt,float forward,float side,float up,float lookX,float lookY,float speed,float zoom,int reset,float depth){
  // Most frames change only the waves. Preserve the full camera state and
  // bypass navigation arithmetic until input, a dolly, or a diagnostic pose edit.
  if(reset==0&&forward==0&&side==0&&up==0&&lookX==0&&lookY==0&&zoom==0&&camera[1].z==0&&camera[5].w==camera[1].x&&camera[6].w==camera[1].y&&camera[8].x==camera[0].y){
@@ -354,6 +354,9 @@ __global__ void camera_step(float4 *camera,float2 *navigationState,float dt,floa
  {float hi=(float)nav5;navigationState[5]=make_float2(hi,(float)(nav5-(double)hi));}
  {float hi=(float)nav6;navigationState[6]=make_float2(hi,(float)(nav6-(double)hi));}
  {float hi=(float)nav7;navigationState[7]=make_float2(hi,(float)(nav7-(double)hi));}
+}
+__global__ void camera_step(float4 *camera,float2 *navigationState,float dt,float forward,float side,float up,float lookX,float lookY,float speed,float zoom,int reset,float depth){
+ camera_advance(camera,navigationState,dt,forward,side,up,lookX,lookY,speed,zoom,reset,depth);
 }
 // Project the pointer to the actual FFT surface on the GPU, retaining the
 // previous hit so a held drag injects force along its world-space path.

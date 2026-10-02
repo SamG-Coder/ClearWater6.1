@@ -2,7 +2,7 @@
 
 [Live demo](https://samg-coder.github.io/ClearWater6.1/) · [Build and deployment](https://github.com/SamG-Coder/ClearWater6.1/actions/workflows/pages.yml)
 
-![Shallow water with FFT drag interaction](docs/preview.png)
+![ClearWater spacecraft over the ocean](docs/spacecraft.png)
 
 A CUDA WebShader ocean at Earth scale, with FFT waves, clear shallow-water refraction, sunlight caustics, a procedural seabed, plate-based continents and ocean depths, global weather, and a GPU-resident fly camera. Weather wind-energy memory and rain techniques are adapted from `D:\ClearWater`. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the exact source and license. The compiler and runtime come from [CUDA WebShader](https://github.com/SamG-Coder/cuda-webshader).
 
@@ -16,6 +16,24 @@ npm start
 
 Open http://127.0.0.1:5191 in a browser with WebGPU enabled. `npm run build` compiles every kernel ahead of time, so the browser loads generated artifacts rather than recompiling CUDA source. `dist/` is a standalone static site, including the CUDA source and runtime.
 
+## Spacecraft flight
+
+Ordinary visits now start in third-person spacecraft flight. The original water study remains at `?mode=explorer`; frozen `?t=` diagnostic fixtures keep the water-study mode unless `mode=ship` is explicit.
+
+The original ship is generated entirely in `src/ship.cu`, with 128 separate components and 68,800 nondegenerate triangles, denser curved hull and canopy meshes, mirrored wings and stabilizers, turbine intakes, ribbed exhaust hardware, a cockpit frame and interior, procedural paint/metal/glass materials, panel seams, serial markings, self-shadowing and thrust-responsive blue exhaust volumes. No spacecraft models or texture images are imported. The static triangle mesh and its two-level bounding-volume hierarchy are generated once on the GPU. Navigation, flight response, banking, camera tracking, geometry, materials and ray tracing remain in CUDA.
+
+- **W / S:** thrust / brake. **A / D:** turn and bank.
+- **Drag** to steer, or use **Lock mouse**. **Esc** releases the pointer.
+- **Space or E / Q:** rise / descend. **Shift:** boost.
+- **Mouse wheel:** increase / decrease the thrust limit.
+- **V / Inspect ship:** orbit the craft without steering it.
+- **Space** in the toolbar moves to orbital altitude above the current location; **Ocean** returns to a surface preset.
+- Phones use the movement joystick, screen-drag steering and altitude buttons. Portrait view automatically increases chase distance to keep both wings in frame.
+
+This stage is a flight and spacecraft-rendering prototype. It has terrain clearance, but no landing sequence, walking character, combat, inventory or survival loop. Ship reflections/shadows are not yet integrated into the ocean surface. Self-shadowing uses mesh intersections; glass and exhaust lighting are approximations. PC keeps four spatial samples; the mobile profile uses the same mesh with one sample and the existing adaptive framebuffer.
+
+`npm run test:ship` checks exact mirrored geometry, both upward stabilizers, BVH intersections against an independent brute-force triangle oracle, actual flight/bank/orbit/wheel controls, mouse lock, touch joystick/steering, surface/space solar-time continuity and actual 2560×1440 / 3840×2160 output. It saves screenshots and GPU timing results under `captures/`. Phone viewport emulation does not measure a physical phone GPU.
+
 ## Explore
 
 Hold the left mouse button and drag across the water to apply force. Right-drag to look, or click **Fly camera** to capture the mouse. **WASD** flies in the viewing direction; **Q/E** lowers/raises the camera; **Shift** boosts speed. Scroll changes flight speed while the mouse is locked; with the mouse free it zooms between the surface and space. Ctrl + scroll zooms while flying. **Esc** releases the mouse. Arrow keys look, **H** hides the panel, and **Reset** restores the shallow-water view. The camera stays above the ocean and maintains two metres of clearance over generated land.
@@ -24,7 +42,7 @@ Depth, wave energy, wind, exposure, and render resolution are adjustable. **Shal
 
 ## CUDA implementation
 
-All simulation, camera integration, ray generation, lighting, seabed materials, optics, tone mapping, and pixel packing live in `src/water.cu`. JavaScript handles input events, UI, resource creation, dispatches, and copying the GPU output to the canvas. There are no downloaded textures, Three.js, WebGL, or handwritten WGSL shaders in the water implementation.
+Water simulation, camera integration, ray generation, lighting, seabed materials, optics, tone mapping, and pixel packing live in `src/water.cu`; spacecraft geometry, navigation and rendering live in `src/ship.cu`. JavaScript handles input events, UI, resource creation, dispatches, and copying the GPU output to the canvas. There are no downloaded textures, Three.js, WebGL, or handwritten WGSL shaders in the water implementation.
 
 - Two deterministic 128 × 128 complex spectral cascades span 6 m and 96 m. A wind-aligned Phillips-style spectrum evolves with finite-depth gravity-wave dispersion, `omega² = g k tanh(k depth)`.
 - Hermitian spectra and a separable radix-2 inverse FFT produce real heights. Resolved finite differences produce normals. The deliberately unnormalized inverse FFT uses source amplitudes calibrated in world units.
@@ -32,7 +50,7 @@ All simulation, camera integration, ray generation, lighting, seabed materials, 
 - Fresnel reflection, per-channel Beer-Lambert absorption, water scattering, and sun highlights shade the surface.
 - A 512 × 512 PC sunlight map (256 × 256 in Mobile and Performance) follows refracted rays to the mean-depth plane and estimates the photon mapping Jacobian. Area compression produces caustic focusing, with slightly different RGB indices of refraction. The map follows the short-wave cascade; the long cascade contributes surface shape and normals. This keeps the caustic tile periodic and bounded in cost.
 - A moving left-button drag is projected onto the water on the GPU. A Gaussian pressure path injects vertical velocity into a third complex spectral field, evolved with an analytic damped gravity-wave oscillator before the same inverse FFT. The wake changes surface height, normals, reflection and view-ray refraction, and persists after release. Stationary clicks and hover inject no force. The caustic photon map uses the background short-wave cascade; it does not include the interaction cascade. Interaction waves repeat every 24 m.
-- Camera state remains in a GPU buffer. CPU inputs supply motion and look axes. The live frame loop never downloads camera, simulation, or pixel buffers.
+- Camera state remains in a GPU buffer. CPU inputs supply motion and look axes. The render loop does not download simulation or pixel buffers; a small asynchronous camera/weather read updates the HUD.
 
 This is a height-field approximation. It has no overturning breakers, underwater camera, shoreline wetting, or volumetric multiple scattering. Forward photon transport accumulates overlapping refracted rays; the finite light-map resolution bounds the smallest visible caustic features. Spectral fields repeat at their patch lengths, and the caustic tile repeats every 6 m.
 

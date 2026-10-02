@@ -1,5 +1,12 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ClearWater6.1 · Light below the surface</title><link rel="icon" href="data:,"><link rel="stylesheet" href="style.css"></head><body>
-<canvas tabindex="0" id="water" aria-label="FFT water with fly camera"></canvas>
+<canvas tabindex="0" id="water" aria-label="ClearWater spacecraft and ocean"></canvas>
+<section id="shipHUD" aria-label="Spacecraft controls">
+ <div class="ship-heading"><span class="ship-kicker">CLEARWATER / FLIGHT</span><strong>Exploration craft <span>01</span></strong><p id="shipModeLabel">THIRD-PERSON FLIGHT</p></div>
+ <div class="ship-toolbar"><button id="shipInspect">Inspect ship · V</button><button id="shipFly">Lock mouse ↗</button><button id="shipSpace">Space</button><button id="shipSurface">Ocean</button><a href="?mode=explorer">Water study ↗</a></div>
+ <div class="ship-reticle" aria-hidden="true"><i></i></div>
+ <div class="ship-instruments"><div><span>VELOCITY</span><strong id="shipSpeed">0.0 m/s</strong></div><div><span>ALTITUDE</span><strong id="shipAltitude">22.0 m</strong></div><div><span>THRUST LIMIT</span><strong id="shipLimit">40.0 m/s</strong></div></div>
+ <div class="ship-help"><span><b>W / S</b> Thrust / brake</span><span><b>A / D</b> Turn</span><span><b>Drag</b> Steer / orbit</span><span><b>Space / Q</b> Rise / descend</span><span><b>Shift</b> Boost</span><span><b>Wheel</b> Speed</span></div>
+</section>
 <header><a class="brand" href="./">CLEARWATER<span>6.1</span></a><span class="badge"><i></i> EARTH SCALE · 1:1</span></header>
 <aside id="panel"><div class="eyebrow">A SPECTRAL WATER STUDY</div><h1>Follow<br>the light.</h1><p class="intro">Clear shallows. Moving sunlight.<br>One ocean. An entire planet.</p>
 <div class="presets"><button id="shallows" class="active">Shallows</button><button id="ocean">Open water</button><button id="space">Space</button></div>

@@ -1,12 +1,13 @@
 import {readFile,writeFile,mkdir,cp} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
-const source=await readFile('src/water.cu','utf8');
+const [waterSource,shipSource]=await Promise.all(['src/water.cu','src/ship.cu'].map(file=>readFile(file,'utf8')));
+const source=waterSource+'\n'+shipSource;
 await mkdir('dist/kernels',{recursive:true});
 await mkdir('kernels',{recursive:true});
 for(const m of source.matchAll(/__global__ void (\w+)/g)){
  // Keep 64 lanes, but render horizontal strips for coherent pixel accesses.
- const name=m[1],artifact=compile(source,{entry:name,workgroupSize:['render','render_pc','render_pc_single'].includes(name)?[32,2,1]:['fft_local','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe'].includes(name)?[64,1,1]:['camera_step','brush_pick','weather_update','weather_visit','geology_seed','geology_update','geology_visit','terrain_cache_setup'].includes(name)?[1,1,1]:[8,8,1]});
+ const name=m[1],artifact=compile(name.startsWith('ship_')?source:waterSource,{entry:name,workgroupSize:['render','render_pc','render_pc_single','ship_render'].includes(name)?[32,2,1]:['ship_probe','ship_mesh','ship_bounds','fft_local','sample_quality_probe','bed_quality_probe','domain_probe','planet_probe','weather_probe','geology_probe','terrain_probe','terrain_screen_probe'].includes(name)?[64,1,1]:['ship_step','camera_step','brush_pick','weather_update','weather_visit','geology_seed','geology_update','geology_visit','terrain_cache_setup'].includes(name)?[1,1,1]:[8,8,1]});
  await writeFile(`dist/kernels/${name}.json`,JSON.stringify(serializableArtifact(artifact)));
  await writeFile(`kernels/${name}.json`,JSON.stringify(serializableArtifact(artifact)));
  console.log(`Compiled ${name}`);
