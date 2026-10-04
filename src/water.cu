@@ -1284,7 +1284,8 @@ __global__ void geology_update(float4 *camera,float depth,int enabled){
  float e=128/earth_radius(),sx=(terrain_height(camera,unit(plus(n,scale(east,e))))-terrain_height(camera,unit(minus(n,scale(east,e)))))/256;
  float sz=(terrain_height(camera,unit(plus(n,scale(back,e))))-terrain_height(camera,unit(minus(n,scale(back,e)))))/256;
  camera[24]=make_float4(ground,sx,sz,camera[0].y-ground);camera[25]=cached_water_bound(camera,n,ground,underwater_bound(camera,n,g.x));
- if(enabled!=0&&ground>0&&camera[0].y<ground+2){camera[0].y=ground+2;camera[8].x=ground+2;camera[24].w=2;}
+ float eyeClearance=camera[20].z==1?1.70f:2;
+ if(enabled!=0&&ground>0&&camera[0].y<ground+eyeClearance){camera[0].y=ground+eyeClearance;camera[8].x=ground+eyeClearance;camera[24].w=eyeClearance;}
 }
 __global__ void terrain_probe(const float4 *points,const float4 *camera,float4 *output,int count,int rays){
  int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=count)return;float4 p=points[i];float3 n=unit(vec(p.x,p.y,p.z));
@@ -1590,7 +1591,7 @@ __device__ float4 cloud_volume(float3 ray,const float4 *camera,float ground,floa
 }
 __global__ void weather_cloud_view(float4 *camera,const float *hits,int cloudWidth,int cloudHeight,float aspect){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=cloudWidth||y>=cloudHeight)return;
- if(x==0&&y==0)camera[20]=make_float4((float)cloudWidth,(float)cloudHeight,0,0);
+ if(x==0&&y==0)camera[20]=make_float4((float)cloudWidth,(float)cloudHeight,camera[20].z,0);
  float sx=(2*((float)x+.5f)/(float)cloudWidth-1)*aspect,sy=1-2*((float)y+.5f)/(float)cloudHeight;
  float3 f=vec(camera[2].x,camera[2].y,camera[2].z),r=vec(camera[3].x,camera[3].y,camera[3].z),u=vec(camera[4].x,camera[4].y,camera[4].z);
  float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(u,sy*.65f))));

@@ -31,6 +31,10 @@ jobs:
           node --check flight-loading.js
           node --check ship-profile.js
           node --check combat-hud.js
+          node --check outpost-hud.js
+          node --check scripts/outpost-verify.mjs
+          node --check scripts/outpost-mobile-verify.mjs
+          node --check scripts/outpost-input-verify.mjs
           node --check scripts/build.mjs
           node --check scripts/serve.mjs
           node --check scripts/verify.mjs

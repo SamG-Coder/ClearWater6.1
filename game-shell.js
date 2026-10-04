@@ -141,11 +141,11 @@ export function createGameShell(host){
  $('throttle').oninput=()=>host.throttle(Number($('throttle').value));
  // Escape may release pointer lock without producing a keyboard event.
  addEventListener('keydown',e=>{
-  if(e.code==='Escape'){e.preventDefault();e.stopImmediatePropagation();if(e.repeat||performance.now()-escapeAt<180)return;if(pending)return;if(page==='playing')pause();else if(page==='settings')show(origin);else if(page==='pause')resume();else if(page==='confirm')show('setup');else if(page==='setup')show('main');return;}
+  if(e.code==='Escape'){e.preventDefault();e.stopImmediatePropagation();if(e.repeat||performance.now()-escapeAt<180)return;if(pending)return;if(page==='playing'){if(host.closeDialogue?.())return;pause();}else if(page==='settings')show(origin);else if(page==='pause')resume();else if(page==='confirm')show('setup');else if(page==='setup')show('main');return;}
   if(page==='playing')return;
   if(e.code==='Tab'){const nodes=[...root.querySelectorAll('button,input,select,a[href]')].filter(el=>!el.disabled&&el.tabIndex>=0&&el.getClientRects().length);if(nodes.length){const first=nodes[0],last=nodes.at(-1);if(e.shiftKey&&(document.activeElement===first||!root.contains(document.activeElement))){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}
  },true);
- document.addEventListener('pointerlockchange',()=>{if(!document.pointerLockElement&&page==='playing'&&!pending){escapeAt=performance.now();pause();}});
+ document.addEventListener('pointerlockchange',()=>{if(!document.pointerLockElement&&page==='playing'&&!pending&&!host.dialogueOpen?.()){escapeAt=performance.now();pause();}});
  document.addEventListener('visibilitychange',()=>{if(document.hidden)pause();});
  addEventListener('blur',()=>{if(page==='playing')pause();});
  readSave();show('boot');

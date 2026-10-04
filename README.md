@@ -16,9 +16,23 @@ npm start
 
 Open http://127.0.0.1:5191 in a browser with WebGPU enabled. `npm run build` compiles every kernel ahead of time, so the browser loads generated artifacts rather than recompiling CUDA source. `dist/` is a standalone static site, including the CUDA source and runtime.
 
+## Outpost defence
+
+Normal New Game starts with your ship parked on the coastal outpost apron. Disembark and meet Commander Vale and Engineer Ren outside the two buildings. Vale offers a two-wave pirate defence contract; launch to start the warning countdown. Pirates attack the outpost's shield and power plant, with an interceptor engaging your craft. Destroy three ships in the first wing and four in the second, then land and report back for a one-time 750-credit reward. Ren restores the craft's hull, shields and rocket rack outside an active attack. A disabled outpost can be restored for a retry through Vale.
+
+Landing checks dry terrain, speed, clearance, slope and building obstructions. The ship remains anchored while the first-person pilot walks, with ground following and collisions against the craft, outpost buildings and equipment. The outpost, crew, landing gear, surface controls and mission are procedural CUDA; browser code presents text and forwards input. Crew currently use simple procedural helmeted suit models. The station uses 128 analytic parts and a shared binary BVH, with terrain depth used to occlude parked craft and combat effects.
+
+Run `npm run test:outpost` for the desktop mission, terrain landing, save/continue and 1440p/4K checks. Run `npm run test:outpost:mobile` for the touch profile, joystick, drag look and dialogue checks; this is browser emulation, not a physical-phone benchmark. `npm run test:outpost:input` checks secondary-finger interaction, keyboard activation and suppression of duplicate touch clicks.
+
+![Parked spacecraft and the outpost crew](docs/outpost.png)
+
+See [the validation record](docs/outpost-validation.md) for the tested mission loop and measured rendering cost.
+
+Saves retain the outpost's precise planet anchor, landed/on-foot position, contract stage, remaining enemies, base condition and credits. Continue reconstructs a remaining pirate wing rather than resetting the contract. Older saves acquire an outpost without moving the saved ship. Free Roam can land and explore but does not start pirate attacks. This first playable mission uses exterior conversations and a contract reward; building interiors, an inventory, trading and a wider campaign are not implemented.
+
 ## Spacecraft flight
 
-Ordinary visits open the spacecraft-themed main menu over a rendered orbital scene. **Continue Game** restores a saved normal flight, **New Game** registers your pilot and ship names, previews primary/secondary/booster colours on the actual craft, then starts a fresh normal flight (with confirmation before replacing an existing save), and **Free Roam** starts an unrestricted session without replacing normal progress. Startup opens a spacecraft-themed pre-flight screen: graphics connection, shader downloads, GPU pipeline preparation, spacecraft/planet setup and the first completed view. Download and shader counts reflect completed work rather than a simulated percentage; an elapsed timer stays visible during slow shader preparation. Settings remain available, graphics-profile changes show a compact progress panel, and failed preparation offers a retry. Launch unlocks only after the requested view finishes on the GPU. The original water study remains at `?mode=explorer`; frozen `?t=` diagnostic fixtures bypass the game menu and retain the exploration flight profile.
+Ordinary visits open the spacecraft-themed main menu over a rendered orbital scene. **Continue Game** restores a saved normal flight, **New Game** registers your pilot and ship names, previews primary/secondary/booster colours on the actual craft, then starts parked at a coastal outpost (with confirmation before replacing an existing save), and **Free Roam** starts an unrestricted session without replacing normal progress. Startup opens a spacecraft-themed pre-flight screen: graphics connection, shader downloads, GPU pipeline preparation, spacecraft/planet setup and the first completed view. Download and shader counts reflect completed work rather than a simulated percentage; an elapsed timer stays visible during slow shader preparation. Settings remain available, graphics-profile changes show a compact progress panel, and failed preparation offers a retry. Launch unlocks only after the requested view finishes on the GPU. The original water study remains at `?mode=explorer`; frozen `?t=` diagnostic fixtures bypass the game menu and retain the exploration flight profile.
 
 **Esc** pauses the ship, FFT simulation and weather clock, clears held inputs and releases the pointer. Resume, Settings and Main Menu are available from the pause screen. Losing mouse lock, hiding the tab or switching windows also pauses a running game. Paused menus retain the last rendered frame and stop continuous GPU dispatch; a graphics change or resize requests a fresh frame without advancing time.
 
@@ -41,7 +55,10 @@ The original ship is generated entirely in `src/ship.cu`, with 128 separate comp
 
 - **W / S:** thrust / brake. **A / D:** turn and bank.
 - **Drag** to steer, or use **Lock mouse**. **Esc** pauses and releases the pointer (diagnostic fixtures only release it).
-- **Space or E / Q:** rise / descend. **Shift:** boost.
+- **Space / Q:** rise / descend. **Shift:** boost (or sprint on foot).
+- **L:** land on dry, level terrain below 22 m/s and within 48 m of the ground; take off when parked.
+- **E:** disembark, board at the nose of the ship, or talk to a nearby crew member.
+- On foot: **WASD** walks and strafes, **mouse / drag** looks around. Touch uses the existing joystick and contextual Land / Disembark / Talk buttons.
 - **Mouse wheel:** increase / decrease throttle in Normal Game, or the unrestricted thrust limit in Free Roam.
 - **V / Inspect ship:** orbit the craft without steering it.
 - In **Free Roam**, **Space** in the toolbar moves to orbital altitude above the current location; **Ocean** returns to a surface preset.

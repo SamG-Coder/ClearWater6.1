@@ -1,0 +1,154 @@
+{
+  "desktop": {
+    "dialogue": {
+      "proximity": true,
+      "freezesWalking": true,
+      "acceptsContract": true
+    },
+    "surface": {
+      "landedStart": true,
+      "firstPerson": true,
+      "walkedMetres": 7.6,
+      "shipStayedParked": true,
+      "crewCollision": true,
+      "boarded": true,
+      "tookOff": true
+    },
+    "landingRejects": {
+      "fast": true,
+      "high": true
+    },
+    "firstWingShots": 60,
+    "secondWingShots": 71,
+    "combat": {
+      "twoWings": true,
+      "actualMountedLasers": true,
+      "kills": 7,
+      "outpostSurvived": 1500
+    },
+    "baseUnderAttack": true,
+    "failure": true,
+    "rewardOnce": true,
+    "saveContinue": true,
+    "engineerService": true,
+    "landedAndWalkedOnTerrain": true,
+    "performance1440": {
+      "width": 2560,
+      "height": 1440,
+      "samples": 16,
+      "animated": false,
+      "medianMs": 23.681504,
+      "p95Ms": 23.940256,
+      "scope": "GPU camera, global weather, sky cache when due, spectrum, FFT, normals, caustics and render; excludes texture copy and browser presentation",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "features": [
+          "core-features-and-limits",
+          "subgroup-size-control",
+          "shader-f16",
+          "float32-filterable",
+          "subgroups",
+          "timestamp-query"
+        ],
+        "timestampQuery": true,
+        "limits": {
+          "maxComputeInvocationsPerWorkgroup": 1024,
+          "maxComputeWorkgroupStorageSize": 16384,
+          "maxStorageBufferBindingSize": 268435456
+        }
+      }
+    },
+    "performance4k": {
+      "width": 3840,
+      "height": 2160,
+      "samples": 16,
+      "animated": false,
+      "medianMs": 44.323904,
+      "p95Ms": 45.442272,
+      "scope": "GPU camera, global weather, sky cache when due, spectrum, FFT, normals, caustics and render; excludes texture copy and browser presentation",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "features": [
+          "core-features-and-limits",
+          "subgroup-size-control",
+          "shader-f16",
+          "float32-filterable",
+          "subgroups",
+          "timestamp-query"
+        ],
+        "timestampQuery": true,
+        "limits": {
+          "maxComputeInvocationsPerWorkgroup": 1024,
+          "maxComputeWorkgroupStorageSize": 16384,
+          "maxStorageBufferBindingSize": 268435456
+        }
+      }
+    },
+    "shipRays": {
+      "rays": 36,
+      "hits": 28,
+      "misses": 8,
+      "maxError": 3.935271799093698e-06,
+      "finite": true
+    },
+    "waterLandingRejected": true,
+    "freeRoamPreservesSave": true,
+    "errors": []
+  },
+  "mobile": {
+    "physicalPhone": false,
+    "joystickWalk": true,
+    "dragLook": true,
+    "touchDialogue": true,
+    "landscapeNoOverflow": true,
+    "gpu": {
+      "width": 960,
+      "height": 440,
+      "samples": 16,
+      "animated": false,
+      "medianMs": 3.971776,
+      "p95Ms": 4.259328,
+      "scope": "GPU camera, global weather, sky cache when due, spectrum, FFT, normals, caustics and render; excludes texture copy and browser presentation",
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "features": [
+          "core-features-and-limits",
+          "subgroup-size-control",
+          "timestamp-query",
+          "float32-filterable",
+          "subgroups",
+          "shader-f16"
+        ],
+        "timestampQuery": true,
+        "limits": {
+          "maxComputeInvocationsPerWorkgroup": 1024,
+          "maxComputeWorkgroupStorageSize": 16384,
+          "maxStorageBufferBindingSize": 268435456
+        }
+      }
+    },
+    "actualMobileRenderProfile": true,
+    "errors": []
+  },
+  "input": {
+    "secondaryFingerInteraction": true,
+    "noDuplicateSyntheticClick": true,
+    "keyboardActivation": true
+  },
+  "additional": {
+    "dialogueEscape": true,
+    "engineerService": true,
+    "landedAndWalkedOnTerrain": true,
+    "waterLandingRejected": true,
+    "peacefulFreeRoamPreservesSave": true
+  }
+}

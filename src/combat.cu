@@ -42,52 +42,65 @@ __device__ int combat_target(const float4 *state,float3 origin,float3 direction,
  for(int i=0;i<5;i++){int e=combat_enemy(i);if(state[e].w==0||state[e+14].x<=0)continue;float3 to=minus(ship_xyz(state[e+9]),origin);float distance=sqrtf(dotv(to,to)),alignment=dotv(unit(to),direction),score=(1-alignment)*6+distance/8000;if(distance<range&&alignment>cone&&score<best){best=score;target=i;}}
  return target;
 }
+__device__ float3 combat_outpost(const float4 *ship){return plus(ship_xyz(ship[32]),outpost_axis(ship,vec(0,3,-18)));}
+__device__ void combat_base_damage(float4 *ship,float amount){float shield=fminf(ship[33].y,amount);ship[33].y-=shield;ship[33].x=fmaxf(0,ship[33].x-amount+shield);ship[33].z=0;ship[33].w=1;}
 __device__ void combat_laser(float4 *state,float4 *ship,float3 start,float3 direction,int owner){
  float reach=1600,nearest=1;int victim=-2;float3 end=plus(start,scale(direction,reach));
  if(owner<0){for(int i=0;i<5;i++){int e=combat_enemy(i);if(state[e].w==0||state[e+14].x<=0)continue;float3 centre=ship_xyz(state[e+9]);float t=combat_sweep(minus(start,centre),minus(end,centre),7);if(t>=0&&t<nearest){nearest=t;victim=i;}}}
+ else if(ship[21].w==62&&state[combat_enemy(owner)+15].y==1){float3 base=combat_outpost(ship);float t=combat_sweep(minus(start,base),minus(end,base),24);if(t>=0){nearest=t;victim=-3;}}
  else if(ship[14].x>0){float t=combat_sweep(start,end,7);if(t>=0){nearest=t;victim=-1;}}
  end=plus(start,scale(direction,reach*nearest));float3 hue=owner<0?vec(.08f,.65f,1):vec(1,.04f,.015f);combat_effect(state,start,end,1,hue,1);
+ if(victim==-3){combat_base_damage(ship,14);combat_effect(state,end,end,3,hue,1);}
  if(victim>=-1){if(victim<0)combat_damage(ship,9);else combat_damage(state+combat_enemy(victim),16);combat_effect(state,end,end,3,hue,1);state[10].w+=1;}
 }
 __global__ void combat_step(float4 *state,float4 *ship,const float4 *camera,float4 *brush,float deltaTime,int firing,int weapon,int enemyCount,int resetCombat,int fixture){
- float dt=fminf(.1f,fmaxf(0,deltaTime));float3 player=ship_xyz(ship[0]),velocity=ship_xyz(ship[9]),eye=ship_axis(ship,ship_xyz(ship[7]));
+ int shoot=firing,count=enemyCount;
+ int mission=ship[21].w==62?1:0,stage=(int)ship[21].y;int battle=mission!=0&&(stage==3||stage==5)?1:0;
+ if(mission!=0)count=battle!=0?5:0;
+ float dt=ship[38].x>0?0:fminf(.1f,fmaxf(0,deltaTime));if(mission!=0&&ship[21].x!=0)shoot=0;float3 player=ship_xyz(ship[0]),velocity=ship_xyz(ship[9]),eye=ship_axis(ship,ship_xyz(ship[7]));
  if(resetCombat!=0||state[0].w==0){
   for(int i=0;i<1536;i++)state[i]=make_float4(0,0,0,0);state[0].w=1;state[1].z=-1;
   state[5]=camera[5];state[6]=camera[6];state[7]=camera[7];
   if(ship[16].w!=61||resetCombat==2){ship[14]=make_float4(100,75,20,0);ship[15]=make_float4(0,0,4,0);ship[16]=make_float4(0,0,0,61);}
   state[0].z=ship[16].x;
-  for(int i=0;i<enemyCount;i++)combat_spawn(state,ship,i);
+  if(mission!=0)ship[27].y=-1;else for(int i=0;i<count;i++)combat_spawn(state,ship,i);
  }
+ if(battle!=0&&ship[27].y!=(float)stage){
+  ship[27].y=(float)stage;
+  for(int i=0;i<5;i++){int e=combat_enemy(i);state[e].w=0;if((float)i<ship[34].x){combat_spawn(state,ship,i);float a=(float)i*1.6f;float3 rel=plus(combat_outpost(ship),outpost_axis(ship,vec(sinf(a)*350,100+25*(float)i,cosf(a)*350)));state[e+9]=make_float4(rel.x,rel.y,rel.z,0);}}
+ }
+ if(mission!=0){ship[33].z+=dt;ship[33].w=fmaxf(0,ship[33].w-dt*3);if(ship[33].z>8)ship[33].y=fminf(500,ship[33].y+dt*8);}
  state[0].x+=dt;float time=state[0].x;float3 travel=fixture!=0?scale(velocity,dt):ship_xyz(ship[17]),nose=scale(ship_xyz(ship[6]),-1);if(dt==0)travel=vec(0,0,0);
  combat_repair(ship,dt,100,75);ship[15].x=(float)weapon;ship[15].y-=dt;ship[15].w+=dt;if(ship[15].w>=3){ship[15].z=fminf(4,ship[15].z+1);ship[15].w-=3;}
  // Rebase the encounter with the local planet frame; fast pilots can leave it.
  for(int i=0;i<5;i++){
-  int e=combat_enemy(i);if(i>=enemyCount){state[e].w=0;continue;}
-  if(state[e].w==0){state[e+9].w-=dt;if(dt>0&&state[e+9].w<=0&&ship[9].w<(ship[0].y>80000?10000:500)&&fixture==0)combat_spawn(state,ship,i);else continue;}
+  int e=combat_enemy(i);if(i>=count){state[e].w=0;continue;}
+  if(state[e].w==0){state[e+9].w-=dt;if(mission==0&&dt>0&&state[e+9].w<=0&&ship[9].w<(ship[0].y>80000?10000:500)&&fixture==0)combat_spawn(state,ship,i);else continue;}
   float3 rel=minus(combat_rotate(ship_xyz(state[e+9]),state,camera),travel),v=combat_rotate(ship_xyz(state[e+8]),state,camera);state[e+18]=make_float4(rel.x,rel.y,rel.z,0);
   combat_repair(state+e,dt,90,60);state[e+8].w-=dt;
   if(fixture==0&&dt>0){float phase=time*.13f+(float)i*2.1f;float3 desired=ship_axis(ship,vec(sinf(phase)*145,35+cosf(phase*.7f)*20,-190-cosf(phase)*50));desired.y=fmaxf(desired.y,25-player.y);
+   if(battle!=0){desired=plus(combat_outpost(ship),outpost_axis(ship,vec(sinf(phase)*240,70+cosf(phase*.7f)*25,cosf(phase)*240)));}
    float3 aim=scale(minus(desired,rel),.55f);float cap=player.y>80000?800:135,len=sqrtf(dotv(aim,aim));if(len>cap)aim=scale(aim,cap/len);v=blend(v,aim,1-expf(-dt*1.7f));rel=plus(rel,scale(v,dt));
    float3 point=plus(player,rel);float floor=0;if(camera[21].w!=0&&player.y<20000)floor=fmaxf(0,terrain_height(camera,to_world(camera,unit(vec(point.x,earth_radius()+point.y,point.z)))));
    if(point.y<floor+18){rel.y=floor+18-player.y;v.y=fmaxf(0,v.y);}
   }
-  if(dotv(rel,rel)>25000000){state[e].w=0;state[e+9].w=12;continue;}
-  state[e+9]=make_float4(rel.x,rel.y,rel.z,state[e+9].w);state[e+8].x=v.x;state[e+8].y=v.y;state[e+8].z=v.z;float3 world=plus(player,rel);state[e]=make_float4(world.x,world.y,world.z,1);state[e+3]=make_float4(time,.38f,world.y,135);combat_basis(state+e,scale(rel,-1),eye);
-  if(dt>0&&fixture==0&&ship[14].x>0&&state[e+14].x>0&&state[e+8].w<=0&&dotv(rel,rel)<640000){
-   int kind=i%3,shot=(int)state[e+20].w,side=shot%2==0?-1:1;float3 muzzle=plus(rel,ship_axis(state+e,ship_weapon_mount(kind,side,(shot/2)%2))),aim=unit(minus(scale(velocity,.12f),muzzle));
-   if(kind==1)combat_laser(state,ship,muzzle,aim,i);else combat_projectile(state,muzzle,plus(v,scale(aim,kind==2?230:600)),kind==2?2:0,i,-1,kind==2?22:5);
+  if(mission==0&&dotv(rel,rel)>25000000){state[e].w=0;state[e+9].w=12;continue;}
+  state[e+9]=make_float4(rel.x,rel.y,rel.z,state[e+9].w);state[e+8].x=v.x;state[e+8].y=v.y;state[e+8].z=v.z;float3 world=plus(player,rel);state[e]=make_float4(world.x,world.y,world.z,1);state[e+3]=make_float4(time,.38f,world.y,135);float3 targetPoint=battle!=0&&(i!=0||ship[32].w>1000)?combat_outpost(ship):vec(0,0,0);state[e+15].y=dotv(targetPoint,targetPoint)>0?1:0;combat_basis(state+e,minus(targetPoint,rel),eye);
+  if(dt>0&&fixture==0&&ship[14].x>0&&state[e+14].x>0&&state[e+8].w<=0&&dotv(minus(rel,targetPoint),minus(rel,targetPoint))<640000){
+   int kind=i%3,shot=(int)state[e+20].w,side=shot%2==0?-1:1;float3 muzzle=plus(rel,ship_axis(state+e,ship_weapon_mount(kind,side,(shot/2)%2))),aim=unit(minus(state[e+15].y==1?targetPoint:scale(velocity,.12f),muzzle));
+   if(kind==1)combat_laser(state,ship,muzzle,aim,i);else combat_projectile(state,muzzle,plus(v,scale(aim,kind==2?230:600)),kind==2?2:0,i,state[e+15].y==1?-3:-1,kind==2?32:7);
    combat_effect(state,muzzle,muzzle,4,vec(1,.05f,.015f),1);if(side<0)state[e+20].x=1;else state[e+20].y=1;state[e+20].z=(float)kind;state[e+20].w+=1;
    state[e+8].w=kind==1?2.8f:kind==2?5.0f:.65f;
   }
  }
  int target=combat_target(state,vec(0,0,0),nose,1800,.90f);state[1].z=(float)target;
- if(dt>0&&firing!=0&&ship[14].x>0&&ship[15].y<=0){
+ if(dt>0&&shoot!=0&&ship[14].x>0&&ship[15].y<=0){
   int shot=(int)ship[20].w,side=shot%2==0?-1:1;float3 muzzle=ship_axis(ship,ship_weapon_mount(weapon,side,(shot/2)%2));int discharged=weapon!=2||(target>=0&&ship[15].z>=1)?1:0;
   if(weapon==1){combat_laser(state,ship,muzzle,nose,-1);ship[15].y+=.24f;state[10].y+=1;}
   else if(weapon==2){if(target>=0&&ship[15].z>=1){combat_projectile(state,muzzle,plus(velocity,scale(nose,170)),2,-1,target,48);ship[15].z-=1;ship[15].y+=.9f;state[10].z+=1;}else ship[15].y=0;}
   else{combat_projectile(state,muzzle,plus(velocity,scale(nose,1000)),0,-1,-2,8);ship[15].y+=.10f;state[10].x+=1;}
   if(discharged!=0){combat_effect(state,muzzle,muzzle,4,weapon==1?vec(.08f,.65f,1):vec(1,.48f,.09f),1);if(side<0)ship[20].x=1;else ship[20].y=1;ship[20].z=(float)weapon;ship[20].w+=1;}
- }else if(firing==0)ship[15].y=fmaxf(0,ship[15].y);
+ }else if(shoot==0)ship[15].y=fmaxf(0,ship[15].y);
  // Effects already in flight are rebased before integrating their swept paths.
  for(int i=0;i<64;i++){
   int j=combat_round(i);if(state[j].w<=0)continue;float3 a=ship_xyz(state[j]),v=ship_xyz(state[j+1]);int owner=(int)state[j+2].w,type=(int)state[j+1].w;
@@ -96,20 +109,22 @@ __global__ void combat_step(float4 *state,float4 *ship,const float4 *camera,floa
   if(state[j+3].w==0){state[j+3].w=1;continue;}
   a=minus(combat_rotate(a,state,camera),travel);v=combat_rotate(v,state,camera);
   int lock=(int)state[j+3].x;
-  if(type==2){float3 destination=vec(0,0,0),targetVelocity=velocity;int hasTarget=lock==-1?1:0;if(lock>=0&&state[combat_enemy(lock)].w>0&&state[combat_enemy(lock)+14].x>0){destination=ship_xyz(state[combat_enemy(lock)+9]);targetVelocity=ship_xyz(state[combat_enemy(lock)+8]);hasTarget=1;}
+  if(type==2){float3 destination=vec(0,0,0),targetVelocity=velocity;int hasTarget=lock==-1?1:0;if(lock==-3){destination=combat_outpost(ship);targetVelocity=vec(0,0,0);hasTarget=1;}if(lock>=0&&state[combat_enemy(lock)].w>0&&state[combat_enemy(lock)+14].x>0){destination=ship_xyz(state[combat_enemy(lock)+9]);targetVelocity=ship_xyz(state[combat_enemy(lock)+8]);hasTarget=1;}
    if(hasTarget!=0){float distance=sqrtf(dotv(minus(destination,a),minus(destination,a))),lead=fminf(.7f,distance/340);float3 desired=unit(minus(plus(destination,scale(minus(targetVelocity,velocity),lead)),a));float3 inherited=owner<0?velocity:ship_xyz(state[combat_enemy(owner)+8]);float3 relative=minus(v,inherited),direction=unit(blend(unit(relative),desired,1-expf(-dt*4.5f)));v=plus(inherited,scale(direction,340));}
   }
   float3 b=plus(a,scale(v,dt));float hit=2;int victim=-2;
   if(dt>0&&owner<0){for(int k=0;k<5;k++){int e=combat_enemy(k);if(state[e].w==0||state[e+14].x<=0)continue;float t=combat_sweep(minus(a,ship_xyz(state[e+18])),minus(b,ship_xyz(state[e+9])),type==2?8:7);if(t>=0&&t<hit){hit=t;victim=k;}}}
+  else if(dt>0&&owner>=0&&lock==-3){float3 base=combat_outpost(ship);float t=combat_sweep(minus(a,base),minus(b,base),24);if(t>=0){hit=t;victim=-3;}}
   else if(dt>0&&ship[14].x>0){float t=combat_sweep(plus(a,travel),b,7);if(t>=0){hit=t;victim=-1;}}
   if(player.y+b.y<0&&dt>0){float t=(player.y+a.y)/fmaxf(.0001f,a.y-b.y);if(t>=0&&t<hit){hit=t;victim=-2;}}
   state[j].w-=dt;state[j+2]=make_float4(a.x,a.y,a.z,(float)owner);state[j+3].z+=dt;
-  if(hit<=1){float3 point=plus(a,scale(minus(b,a),hit));if(victim>=0)combat_damage(state+combat_enemy(victim),state[j+3].y);else if(victim==-1)combat_damage(ship,state[j+3].y);
+  if(hit<=1){float3 point=plus(a,scale(minus(b,a),hit));if(victim>=0)combat_damage(state+combat_enemy(victim),state[j+3].y);else if(victim==-1)combat_damage(ship,state[j+3].y);else if(victim==-3)combat_base_damage(ship,state[j+3].y);
    if(type==2){for(int k=0;k<5;k++){int e=combat_enemy(k);if(owner>=0||k==victim||state[e].w==0)continue;float d=sqrtf(dotv(minus(ship_xyz(state[e+9]),point),minus(ship_xyz(state[e+9]),point)));if(d<22)combat_damage(state+e,24*(1-d/22));}}
    combat_effect(state,point,point,type==2?2:3,type==2?vec(1,.28f,.035f):owner<0?vec(1,.68f,.20f):vec(1,.035f,.01f),1);state[j].w=0;state[10].w+=1;
   }else{state[j].x=b.x;state[j].y=b.y;state[j].z=b.z;state[j+1].x=v.x;state[j+1].y=v.y;state[j+1].z=v.z;}
  }
- int alive=0;for(int i=0;i<5;i++){int e=combat_enemy(i);if(state[e].w==0)continue;if(state[e+14].x<=0){combat_effect(state,ship_xyz(state[e+9]),ship_xyz(state[e+9]),2,vec(1,.23f,.025f),2);state[e].w=0;state[e+9].w=12;state[0].z+=1;}else alive++;}
+ int alive=0;for(int i=0;i<5;i++){int e=combat_enemy(i);if(state[e].w==0)continue;if(state[e+14].x<=0){combat_effect(state,ship_xyz(state[e+9]),ship_xyz(state[e+9]),2,vec(1,.23f,.025f),2);state[e].w=0;state[e+9].w=12;state[0].z+=1;if(battle!=0)ship[34].x=fmaxf(0,ship[34].x-1);}else alive++;}
+ if(battle!=0&&dt>0){if(ship[33].x<=0){ship[21].y=8;ship[21].z=0;}else if(ship[34].x==0){ship[21].y=stage==3?4:6;ship[21].z=stage==3?8:0;}}
  brush[12]=make_float4(0,0,0,0);int lightCount=0;
  for(int i=0;i<16;i++){int f=combat_fx(i);if(state[f].w<=0)continue;float3 a=ship_xyz(state[f]),b=ship_xyz(state[f+1]);if(state[f+3].y>0){a=minus(combat_rotate(a,state,camera),travel);b=minus(combat_rotate(b,state,camera),travel);}state[f].x=a.x;state[f].y=a.y;state[f].z=a.z;state[f+1].x=b.x;state[f+1].y=b.y;state[f+1].z=b.z;state[f].w=fmaxf(0,state[f].w-dt);state[f+3].y+=dt;
   if(lightCount<2&&state[f+1].w==2&&state[f].w>0){float3 point=plus(player,a);brush[13+lightCount*2]=make_float4(point.x,point.y,point.z,180*state[f].w*state[f+2].w);brush[14+lightCount*2]=state[f+2];lightCount++;}

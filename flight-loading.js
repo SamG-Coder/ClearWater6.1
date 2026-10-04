@@ -5,10 +5,11 @@ const descriptions={
  device:['Connecting to your GPU','Checking graphics support and opening the flight display.'],
  download:['Downloading flight systems','Loading the shaders for the ocean, planet, atmosphere and spacecraft.'],
  shaders:['Preparing shaders','Your GPU is preparing the graphics pipelines. First-time preparation can take a few minutes.'],
- world:['Building your world','Preparing the spacecraft, ocean surface, terrain and atmosphere.'],
+ world:['Building your world','Preparing your spacecraft, the coastal outpost, ocean and atmosphere.'],
  frame:['Rendering the first view','Waiting for the GPU to finish the scene. Flight controls unlock when it is ready.']
 };
 function system(name){
+ if(name.startsWith('outpost_'))return 'Outpost & surface operations';
  if(name.startsWith('combat_'))return 'Weapons & hostile craft';
  if(name.startsWith('ship_'))return 'Spacecraft';
  if(name.startsWith('render'))return 'Ocean lighting';

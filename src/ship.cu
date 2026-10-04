@@ -216,8 +216,31 @@ __device__ void ship_prepare_colours(float4 *ship){
  if(ship[11].w==0){ship[11]=make_float4(.55f,.61f,.60f,2);ship[12]=make_float4(.65f,.145f,.035f,2);ship[13]=make_float4(.045f,.30f,1,2);}
  for(int i=11;i<=13;i++){float4 c=ship[i];if(c.w==1)ship[i]=make_float4(ship_srgb(c.x),ship_srgb(c.y),ship_srgb(c.z),2);}
 }
+// Ground camera shares the flight eye-frame equations. Keep the flight entry
+// direct: wrapping its whole integrator in a buffer helper slows GPU compilation.
+__device__ void ship_camera(float4 *camera,float2 *navigationState,float4 *ship,float3 offset,float3 f,float3 r,float3 u,float depth){
+ float3 eye=plus(ship_xyz(ship[0]),offset);
+ float3 localEye=ship_inverse(ship,offset);ship[7]=make_float4(localEye.x,localEye.y,localEye.z,0);
+ // All world rays must start at the actual eye, including shoreline traces.
+ // Parallel transport the frame to that eye without changing the ship's
+ // precise navigation state or its small, unquantized model-to-eye transform.
+ float3 oldN=ship_xyz(camera[6]),oldE=ship_xyz(camera[5]);
+ double cnx=(double)navigationState[0].x+(double)navigationState[0].y,cny=(double)navigationState[1].x+(double)navigationState[1].y,cnz=(double)navigationState[2].x+(double)navigationState[2].y;
+ double cex=(double)navigationState[3].x+(double)navigationState[3].y,cey=(double)navigationState[4].x+(double)navigationState[4].y,cez=(double)navigationState[5].x+(double)navigationState[5].y,cr=6371000.0+(double)ship[0].y+(double)offset.y;
+ double cx=cnx*cr+cex*(double)offset.x+(cey*cnz-cez*cny)*(double)offset.z,cy=cny*cr+cey*(double)offset.x+(cez*cnx-cex*cnz)*(double)offset.z,cz=cnz*cr+cez*(double)offset.x+(cex*cny-cey*cnx)*(double)offset.z;
+ double eyeRadius=sqrt(cx*cx+cy*cy+cz*cz);float3 eyeN=vec((float)(cx/eyeRadius),(float)(cy/eyeRadius),(float)(cz/eyeRadius));
+ float3 eyeE=unit(minus(oldE,scale(plus(oldN,eyeN),dotv(oldE,eyeN)/(1+dotv(oldN,eyeN))))),eyeB=crossv(eyeE,eyeN);
+ float3 wf=to_world(camera,f),wr=to_world(camera,r),wu=to_world(camera,u),sr=to_world(camera,ship_xyz(ship[4])),su=to_world(camera,ship_xyz(ship[5])),sb=to_world(camera,ship_xyz(ship[6]));
+ camera[5]=make_float4(eyeE.x,eyeE.y,eyeE.z,camera[5].w);camera[6]=make_float4(eyeN.x,eyeN.y,eyeN.z,0);camera[7]=make_float4(eyeB.x,eyeB.y,eyeB.z,camera[7].w);
+ f=ship_local(camera,wf);r=ship_local(camera,wr);u=ship_local(camera,wu);sr=ship_local(camera,sr);su=ship_local(camera,su);sb=ship_local(camera,sb);
+ ship[4]=make_float4(sr.x,sr.y,sr.z,0);ship[5]=make_float4(su.x,su.y,su.z,0);ship[6]=make_float4(sb.x,sb.y,sb.z,0);
+ eye.y=(float)(eyeRadius-6371000.0);
+ camera[0]=make_float4(eye.x,eye.y,eye.z,0);camera[1]=make_float4(ship[1].x,ship[1].y,0,0);camera[2]=make_float4(f.x,f.y,f.z,depth/.86f);camera[3]=make_float4(r.x,r.y,r.z,expf(-depth*.055f));camera[4]=make_float4(u.x,u.y,u.z,0);camera[8].x=eye.y;camera[8].y=ship[9].w;
+ camera[19].x=ship[0].y;camera[19].y=ship[9].w;camera[19].z=1;
+}
 __global__ void ship_step(float4 *camera,float2 *navigationState,float4 *ship,float deltaTime,float forward,float turn,float rise,float lookX,float lookY,float speed,int boost,int action,int inspect,int flightProfile,float depth,float aspect){
- float dt=fminf(.1f,fmaxf(0,deltaTime));
+ if(ship[21].w==62&&ship[21].x!=0&&ship[38].w!=1&&action==0)return;
+ float dt=ship[38].x>0?0:fminf(.1f,fmaxf(0,deltaTime));
  ship_prepare_colours(ship);
  if(ship[0].w==0||action==1){
   if(camera[8].z==0){float navLength=navigationState[0].x*navigationState[0].x+navigationState[1].x*navigationState[1].x+navigationState[2].x*navigationState[2].x;camera_advance(camera,navigationState,0,0,0,0,0,0,1,0,navLength>.5f?0:1,depth);}
@@ -327,11 +350,11 @@ __global__ void ship_wash_pick(const float4 *camera,const float4 *ship,float4 *b
   float3 engine=plus(ship_xyz(ship[0]),ship_axis(ship,vec(i==0?-4.65f:4.65f,-.5f,2.35f)));
   float height=engine.y,hit=height/fmaxf(.2f,-jet.y),x=engine.x+jet.x*hit,z=engine.z+jet.z*hit;
   float nearWater=1-eased(5,28,height),strength=nearWater*nearWater*(.42f+.58f*ship[3].y)*eased(.2f,.65f,-jet.y)*(1-eased(100,300,ship[9].w));
-  if(height<0||height>=28||jet.y>=-.2f)strength=0;
+  if(height<0||height>=28||jet.y>=-.2f||(ship[21].w==62&&(ship[21].x==2||ship[21].x==3)))strength=0;
   if(strength>0&&camera[21].w!=0){float3 normal=to_world(camera,unit(vec(x-camera[0].x,earth_radius(),z-camera[0].z)));if(terrain_height(camera,normal)>-.12f)strength=0;}
   brush[4+i]=make_float4(x,z,.65f+fminf(28,fmaxf(0,height))*.075f,strength);
   float3 nozzle=plus(ship_xyz(ship[0]),ship_axis(ship,vec(i==0?-4.65f:4.65f,.22f,5.3f)));
-  brush[6+i]=make_float4(nozzle.x,nozzle.y,nozzle.z,16+ship[3].y*65);
+  brush[6+i]=make_float4(nozzle.x,nozzle.y,nozzle.z,ship[21].w==62&&(ship[21].x==2||ship[21].x==3)?0:16+ship[3].y*65);
   float night=1-eased(-.04f,.18f,camera[9].y);
   float3 lamp=plus(ship_xyz(ship[0]),ship_axis(ship,vec(i==0?-.70f:.70f,.22f,-4.8f)));
   brush[8+i]=make_float4(lamp.x,lamp.y,lamp.z,night*160);
@@ -444,7 +467,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
  if(mat==3){color=vec(.015f,.055f,.075f);rough=.075f;metal=.22f;}
  if(mat==4){color=vec(.18f,.22f,.25f);rough=.28f;metal=.92f;}
  if(mat==5){color=vec(.016f,.021f,.025f);rough=.53f;metal=.72f;}
- if(mat==6){float cx=hit.part<32?0:(hit.part<80?-4.65f:4.65f),cy=hit.part<32?-.14f:.22f;float rr=(p.x-cx)*(p.x-cx)+(p.y-cy)*(p.y-cy);float core=expf(-rr*12);float3 hue=ship_xyz(ship[13]);float peak=fmaxf(hue.x,fmaxf(hue.y,hue.z));color=blend(scale(hue,.75f),blend(hue,vec(peak,peak,peak),.32f),core);emission=(.6f+core*7)*(1+ship[3].y*2);}
+ if(mat==6){float cx=hit.part<32?0:(hit.part<80?-4.65f:4.65f),cy=hit.part<32?-.14f:.22f;float rr=(p.x-cx)*(p.x-cx)+(p.y-cy)*(p.y-cy);float core=expf(-rr*12);float3 hue=ship_xyz(ship[13]);float peak=fmaxf(hue.x,fmaxf(hue.y,hue.z));color=blend(scale(hue,.75f),blend(hue,vec(peak,peak,peak),.32f),core);emission=(.6f+core*7)*(1+ship[3].y*2);if(ship[21].w==62&&(ship[21].x==2||ship[21].x==3)){emission=.04f;color=scale(color,.14f);}}
  if(mat==7){color=vec(1,.045f,.01f);emission=3;}
  if(mat==8){color=vec(.08f,1,.50f);emission=3;}
  if(mat==9){color=vec(.014f,.025f,.028f);rough=.65f;metal=.1f;if(hit.part==5&&n.y>.2f){color=vec(.015f,.17f,.22f);emission=1;}}
@@ -503,6 +526,7 @@ __device__ float4 ship_radiance(const float4 *mesh,const float4 *bounds,const fl
 __device__ float3 ship_decode(unsigned color){return vec((float)(color&255u)/255,(float)((color>>8)&255u)/255,(float)((color>>16)&255u)/255);}
 __device__ float ship_unfilm(float c){float y=positive_power(c,2.2f),a=2.51f-2.43f*y,b=.03f-.59f*y;return (-b+sqrtf(b*b+.56f*a*y))/(2*a);}
 __device__ float3 ship_plume(const float4 *ship,float3 origin,float3 ray,float limit){
+ if(ship[21].w==62&&(ship[21].x==2||ship[21].x==3))return vec(0,0,0);
  float3 light=vec(0,0,0),booster=ship_xyz(ship[13]);float peak=fmaxf(booster.x,fmaxf(booster.y,booster.z));float thrust=fmaxf(.12f,ship[3].y),length=1.5f+thrust*5.5f;
  for(int engine=0;engine<2;engine++){
   float cx=engine==0?-4.65f:4.65f,ox=origin.x-cx,oy=origin.y-.22f;
@@ -519,7 +543,7 @@ __device__ float3 ship_plume(const float4 *ship,float3 origin,float3 ray,float l
  }
  return light;
 }
-__global__ void ship_render(const float4 *mesh,const float4 *bounds,const float4 *camera,const float4 *ship,unsigned *image,int width,int height,int samples,float exposure){
+__global__ void ship_render(const float4 *mesh,const float4 *bounds,const float4 *camera,const float4 *ship,const float *hits,unsigned *image,int width,int height,int samples,float exposure){
  int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;if(x>=width||y>=height)return;
  float3 origin=ship_xyz(ship[7]),f=ship_inverse(ship,ship_xyz(camera[2])),r=ship_inverse(ship,ship_xyz(camera[3])),up=ship_inverse(ship,ship_xyz(camera[4]));
  // Reject the combined hull / exhaust bounds once for all spatial samples.
@@ -533,6 +557,8 @@ __global__ void ship_render(const float4 *mesh,const float4 *bounds,const float4
  for(int sample=0;sample<4;sample++){
   if(sample>=samples)break;float ox=samples==1?.5f:((float)(sample%2)+.5f)*.5f,oy=samples==1?.5f:((float)(sample/2)+.5f)*.5f;
   float sx=(2*((float)x+ox)-(float)width)/(float)height,sy=1-2*((float)y+oy)/(float)height;float3 ray=unit(plus(f,plus(scale(r,sx*.65f),scale(up,sy*.65f))));ShipHit hit=ship_trace(mesh,bounds,origin,ray,0);
+  float terrain=terrain_pixel_hit(hits,camera,width,height,(float)x+ox,(float)y+oy,0),limit=terrain>0?terrain:10000000;
+  if(hit.t>limit){hit.triangle=-1;hit.t=limit;}
   float3 plume=ship_plume(ship,origin,ray,hit.t);
   if(hit.triangle<0){if(dotv(plume,plume)<.000001f){sum=plus(sum,bg);continue;}covered++;float3 linear=vec(ship_unfilm(bg.x),ship_unfilm(bg.y),ship_unfilm(bg.z));sum=plus(sum,ship_decode(pack_color(plus(linear,plume))));continue;}covered++;
   float4 lighting=ship_radiance(mesh,bounds,camera,ship,hit,ray,hit.t*1.3f/(float)height,hit.part==previousPart?previousShadow:-1);previousPart=hit.part;previousShadow=lighting.w;
