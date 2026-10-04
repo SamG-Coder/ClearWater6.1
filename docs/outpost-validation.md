@@ -15,6 +15,8 @@ These are 16 measured samples after warmup, using a fixed scene. They include sc
 
 Touch emulation used the actual mobile graphics profile with a Pixel 7 browser configuration. Joystick walking, drag look, touch conversation/acceptance, portrait dialogue bounds and landscape overflow checks passed. A separate input fixture held a first finger while a second activated Talk, verifying one command only and continued keyboard activation. The mobile-profile landscape render measured 3.97 ms median at 960 × 440 **on the desktop GPU**; this is not a Samsung A34 or iPhone performance result. Physical Android and iPhone testing remains to be done.
 
+A dedicated GPU migration fixture tested both 512-wide mobile and 1024-wide desktop geology maps. Starting over an 11,000-metre-deep ocean basin at orbital altitude, the global fallback found land at 12.89 m and 12.48 m respectively, 394 km and 255 km away. The saved ship record and navigation pairs stayed unchanged. An already-stamped invalid underwater anchor was also repaired. Run `npm run test:outpost:migration` for this isolated check.
+
 The art and mission scope is a first playable slice: two exterior crew conversations, one two-wave contract, a saved credit reward and ship servicing. Crew use simple procedural helmeted suits. Interiors, animated character rigs, spending credits, a broader campaign and on-foot weapons are not part of this stage.
 
 Commands: `npm run build`, `npm run test:outpost`, `npm run test:outpost:mobile`, `npm run test:outpost:input`. Machine-readable results are in [outpost-validation.json](outpost-validation.json).

@@ -29,7 +29,8 @@
     "test:ship-profile": "node scripts/ship-profile-verify.mjs",
     "test:outpost": "node scripts/outpost-verify.mjs",
     "test:outpost:mobile": "node scripts/outpost-mobile-verify.mjs",
-    "test:outpost:input": "node scripts/outpost-input-verify.mjs"
+    "test:outpost:input": "node scripts/outpost-input-verify.mjs",
+    "test:outpost:migration": "node scripts/outpost-migration-verify.mjs"
   },
   "devDependencies": {
     "playwright": "1.56.1"

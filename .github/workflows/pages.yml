@@ -35,6 +35,7 @@ jobs:
           node --check scripts/outpost-verify.mjs
           node --check scripts/outpost-mobile-verify.mjs
           node --check scripts/outpost-input-verify.mjs
+          node --check scripts/outpost-migration-verify.mjs
           node --check scripts/build.mjs
           node --check scripts/serve.mjs
           node --check scripts/verify.mjs

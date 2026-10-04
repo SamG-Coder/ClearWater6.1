@@ -150,5 +150,33 @@
     "landedAndWalkedOnTerrain": true,
     "waterLandingRejected": true,
     "peacefulFreeRoamPreservesSave": true
-  }
+  },
+  "migration": [
+    {
+      "repairedInvalidAnchor": true,
+      "mapWidth": 512,
+      "originalOceanDepth": 11000,
+      "outpostAltitude": 12.894707679748535,
+      "distanceMetres": 393654.12851708476,
+      "mode": 0,
+      "stamp": 62,
+      "finite": true,
+      "navigationUnchanged": true,
+      "shipUnchanged": true,
+      "errors": []
+    },
+    {
+      "repairedInvalidAnchor": true,
+      "mapWidth": 1024,
+      "originalOceanDepth": 11000,
+      "outpostAltitude": 12.479228973388672,
+      "distanceMetres": 255277.13262902375,
+      "mode": 0,
+      "stamp": 62,
+      "finite": true,
+      "navigationUnchanged": true,
+      "shipUnchanged": true,
+      "errors": []
+    }
+  ]
 }

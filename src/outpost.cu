@@ -38,7 +38,7 @@ __device__ int outpost_landing_blocked(float3 p){
  return 0;
 }
 __global__ void outpost_init(float4 *camera,float2 *navigationState,float4 *ship,int startParked){
- if(ship[21].w==62)return;
+ if(ship[21].w==62&&ship[28].w>0)return;
  float3 n=vec(navigationState[0].x,navigationState[1].x,navigationState[2].x),east=vec(navigationState[3].x,navigationState[4].x,navigationState[5].x),back=crossv(east,n),chosen=n;float score=1e20f;
  // Search the daylight coast already selected by geology_visit. A single
  // initialization query chooses land; no terrain generation is copied here.
@@ -50,6 +50,20 @@ __global__ void outpost_init(float4 *camera,float2 *navigationState,float4 *ship
  }
  if(score==1e20f){ // Wider deterministic fallback for unusual saved seeds.
   for(int i=0;i<96;i++){float a=(float)i*2.399963f,d=1000+sqrtf((float)i)*2000;float3 q=unit(plus(scale(n,earth_radius()),plus(scale(east,cosf(a)*d),scale(back,sinf(a)*d))));float h=terrain_direct(camera,q);if(h>5&&h<2000&&h<score){score=h;chosen=q;}}
+ }
+ if(score==1e20f){
+  // A migrated save can be over an ocean basin or far out in space. Search
+  // sea-level crossings globally without touching the saved navigation frame.
+  int width=(int)camera[22].y,height=width/2,offset=(int)camera[22].x;float best=-2,bestLon=0,bestLat=0;
+  for(int y=2;y<height-2;y+=2)for(int x=0;x<width;x++){
+   float h=camera[offset+y*width+x].x,h2=camera[offset+y*width+((x+1)&(width-1))].x;if((h-12)*(h2-12)>=0)continue;
+   float lon=(((float)x+.5f)/(float)width-.5f)*6.2831853f,lat=(.5f-((float)y+.5f)/(float)height)*3.14159265f;float3 q=vec(sinf(lon)*cosf(lat),sinf(lat),cosf(lon)*cosf(lat));float alignment=dotv(q,n);
+   if(alignment>best){best=alignment;bestLon=lon;bestLat=lat;}
+  }
+  if(best>-2){float lo=bestLon,hi=lo+6.2831853f/(float)width;float sign=geology_sample(camera,vec(sinf(lo)*cosf(bestLat),sinf(bestLat),cosf(lo)*cosf(bestLat))).x-12;
+   for(int i=0;i<20;i++){float mid=(lo+hi)*.5f;float h=geology_sample(camera,vec(sinf(mid)*cosf(bestLat),sinf(bestLat),cosf(mid)*cosf(bestLat))).x-12;if(h*sign>0)lo=mid;else hi=mid;}
+   float lon=(lo+hi)*.5f;chosen=vec(sinf(lon)*cosf(bestLat),sinf(bestLat),cosf(lon)*cosf(bestLat));east=vec(cosf(lon),0,-sinf(lon));
+  }
  }
  east=unit(minus(east,scale(chosen,dotv(east,chosen))));back=crossv(east,chosen);
  // Normalize the anchor in double precision, then preserve the residual.
